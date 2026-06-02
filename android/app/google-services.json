@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "765403769951",
+    "project_id": "geoseize",
+    "storage_bucket": "geoseize.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:765403769951:android:6ec1df66acd0e9ce757fea",
+        "android_client_info": {
+          "package_name": "com.example.geoseize"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB8EFYit5ajR6qirkIV37D-JCCYfgEcMbE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

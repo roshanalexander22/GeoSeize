@@ -29,6 +29,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _isCapturing = false;
   LatLng? _currentLocation;
   
+  bool _isPlanningMode = false;
+  final List<LatLng> _plannedPath = [];
+  double _plannedDistance = 0.0;
+  double _plannedArea = 0.0;
+  int _plannedTimeMinutes = 0;
+  
   final Distance _distance = const Distance();
 
   late AnimationController _pulseController;
@@ -60,42 +66,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
   
   Future<void> _checkPermissionsAndGetLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
-
     try {
-      serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location services are disabled. Please enable them in your device settings.')),
-          );
-        }
-        return;
-      }
-
-      permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Location permissions are denied. We need this to track your conquests!')),
-            );
-          }
-          return;
-        }
-      }
-      
-      if (permission == LocationPermission.deniedForever) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permissions are permanently denied. Please enable them in app settings.')),
-          );
-        }
-        return;
-      } 
-
+      // LoadingScreen has already guaranteed we have permissions and GPS is active!
       Position position = await Geolocator.getCurrentPosition();
       if (mounted) {
         setState(() {
@@ -185,6 +157,61 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         break;
       }
     }
+  }
+
+  void _handleMapTap(TapPosition tapPosition, LatLng point) {
+    if (!_isPlanningMode) return;
+    setState(() {
+      _plannedPath.add(point);
+      _updatePlanStats();
+    });
+  }
+
+  void _updatePlanStats() {
+    if (_plannedPath.length < 2) {
+      _plannedDistance = 0;
+      _plannedArea = 0;
+      _plannedTimeMinutes = 0;
+      return;
+    }
+    
+    double totalDist = 0;
+    for (int i = 0; i < _plannedPath.length - 1; i++) {
+      totalDist += _distance.as(LengthUnit.Meter, _plannedPath[i], _plannedPath[i+1]);
+    }
+    
+    if (_plannedPath.length >= 3) {
+      totalDist += _distance.as(LengthUnit.Meter, _plannedPath.last, _plannedPath.first);
+      _plannedArea = GeoCalculator.calculateArea(_plannedPath);
+    } else {
+      _plannedArea = 0;
+    }
+    
+    _plannedDistance = totalDist;
+    _plannedTimeMinutes = (_plannedDistance / 82.8).ceil(); // ~5 km/h
+  }
+
+  void _togglePlanningMode() {
+    setState(() {
+      _isPlanningMode = !_isPlanningMode;
+      if (!_isPlanningMode) {
+        _plannedPath.clear();
+        _plannedDistance = 0;
+        _plannedArea = 0;
+        _plannedTimeMinutes = 0;
+      }
+    });
+  }
+
+  Widget _buildPlanStatItem(IconData icon, String label, String value) {
+    return Column(
+      children: [
+        Icon(icon, color: Colors.cyanAccent, size: 24),
+        const SizedBox(height: 8),
+        Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+        Text(label, style: const TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1.5)),
+      ],
+    );
   }
 
   void _showSuccessMessage(CaptureEvent event, {required bool leveledUp}) {
@@ -304,6 +331,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               options: MapOptions(
                 initialCenter: _currentLocation!,
                 initialZoom: 16.5,
+                onTap: _handleMapTap,
               ),
               children: [
                 TileLayer(
@@ -331,6 +359,48 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       ),
                   ],
                 ),
+                if (_isPlanningMode && _plannedPath.length >= 3)
+                  PolygonLayer(
+                    polygons: [
+                      Polygon(
+                        points: _plannedPath,
+                        color: Colors.cyanAccent.withValues(alpha: 0.2),
+                        borderColor: Colors.cyanAccent,
+                        borderStrokeWidth: 2,
+                      ),
+                    ],
+                  ),
+                if (_isPlanningMode && _plannedPath.isNotEmpty)
+                  PolylineLayer(
+                    polylines: [
+                      Polyline(
+                        points: _plannedPath,
+                        color: Colors.cyanAccent,
+                        strokeWidth: 4,
+                      ),
+                      if (_plannedPath.length >= 3)
+                        Polyline(
+                          points: [_plannedPath.last, _plannedPath.first],
+                          color: Colors.cyanAccent.withValues(alpha: 0.5),
+                          strokeWidth: 4,
+                        ),
+                    ],
+                  ),
+                if (_isPlanningMode && _plannedPath.isNotEmpty)
+                  MarkerLayer(
+                    markers: _plannedPath.map((p) => Marker(
+                      point: p,
+                      width: 12,
+                      height: 12,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.cyanAccent,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.black, width: 2),
+                        ),
+                      ),
+                    )).toList(),
+                  ),
                 if (_currentLocation != null)
                   MarkerLayer(
                     markers: [
@@ -475,12 +545,85 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     ),
                   ),
                 ),
+                const SizedBox(height: 16),
+                // Recon Mode Toggle Button
+                ClipOval(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: _isPlanningMode ? Colors.cyanAccent.withValues(alpha: 0.2) : Colors.black.withValues(alpha: 0.3),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: _isPlanningMode ? Colors.cyanAccent : Colors.white.withValues(alpha: 0.1)),
+                      ),
+                      child: IconButton(
+                        icon: Icon(Icons.explore, color: _isPlanningMode ? Colors.cyanAccent : Colors.white70),
+                        onPressed: _togglePlanningMode,
+                        tooltip: 'Recon Mode',
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
 
-          // Custom Capture Button
-          Positioned(
+          // Planning Stats Panel
+          if (_isPlanningMode)
+            Positioned(
+              bottom: 40,
+              left: 16,
+              right: 16,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  child: Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E1E28).withValues(alpha: 0.8),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.3), width: 1),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          'RECONNAISSANCE MODE',
+                          style: TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, letterSpacing: 3),
+                        ),
+                        const SizedBox(height: 20),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _buildPlanStatItem(Icons.route, 'DISTANCE', '${_plannedDistance.toStringAsFixed(0)}m'),
+                            _buildPlanStatItem(Icons.timer, 'EST. TIME', '$_plannedTimeMinutes min'),
+                            _buildPlanStatItem(Icons.square_foot, 'AREA YIELD', '${_plannedArea.toStringAsFixed(0)}m²'),
+                          ],
+                        ),
+                        if (_plannedPath.isNotEmpty) ...[
+                          const SizedBox(height: 16),
+                          TextButton.icon(
+                            onPressed: () {
+                              setState(() {
+                                _plannedPath.clear();
+                                _updatePlanStats();
+                              });
+                            },
+                            icon: const Icon(Icons.clear, color: Colors.white54, size: 18),
+                            label: const Text('CLEAR ROUTE', style: TextStyle(color: Colors.white54, letterSpacing: 1.5)),
+                          )
+                        ]
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // Custom Capture Button (hide if planning)
+          if (!_isPlanningMode)
+            Positioned(
             bottom: 40,
             left: 0,
             right: 0,

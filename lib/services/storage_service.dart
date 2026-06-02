@@ -1,37 +1,44 @@
-import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../models/capture_event.dart';
 
 class StorageService {
-  static const String _eventsKey = 'geoseize_capture_events';
+  FirebaseFirestore get _db => FirebaseFirestore.instance;
+  FirebaseAuth get _auth => FirebaseAuth.instance;
 
-  /// Saves the list of capture events to persistent storage
+  String? get _userId => _auth.currentUser?.uid;
+
+  /// Saves the list of capture events to Firestore
   Future<void> saveEvents(List<CaptureEvent> events) async {
-    final prefs = await SharedPreferences.getInstance();
+    final uid = _userId;
+    if (uid == null) return; // Not logged in
     
+    // We save all events in a single document array to minimize Firestore write costs
     List<Map<String, dynamic>> serializableEvents = events.map((e) => e.toJson()).toList();
-    String jsonString = jsonEncode(serializableEvents);
     
-    await prefs.setString(_eventsKey, jsonString);
+    await _db.collection('users').doc(uid).set({
+      'events': serializableEvents
+    });
   }
 
-  /// Loads the list of capture events from persistent storage
+  /// Loads the list of capture events from Firestore
   Future<List<CaptureEvent>> loadEvents() async {
-    final prefs = await SharedPreferences.getInstance();
-    String? jsonString = prefs.getString(_eventsKey);
-    
-    if (jsonString == null) return [];
+    final uid = _userId;
+    if (uid == null) return [];
 
     try {
-      List<dynamic> decodedList = jsonDecode(jsonString);
-      return decodedList.map((dynamic jsonMap) {
+      final doc = await _db.collection('users').doc(uid).get();
+      if (!doc.exists || doc.data() == null) return [];
+      
+      final data = doc.data()!;
+      if (data['events'] == null) return [];
+
+      List<dynamic> eventsList = data['events'];
+      return eventsList.map((dynamic jsonMap) {
         return CaptureEvent.fromJson(jsonMap as Map<String, dynamic>);
       }).toList();
     } catch (e) {
-      // If we fail to decode, it might be the old format. 
-      // Wipe data gracefully to avoid crashing.
-      print("Error loading events (likely old format): \$e");
-      await wipeData();
+      print("Error loading events from Firestore: $e");
       return [];
     }
   }
@@ -48,10 +55,9 @@ class StorageService {
 
   /// Wipe all data to start over
   Future<void> wipeData() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_eventsKey);
-    // Also remove the old keys just in case
-    await prefs.remove('geoseize_territories');
-    await prefs.remove('geoseize_total_area');
+    final uid = _userId;
+    if (uid == null) return;
+    
+    await _db.collection('users').doc(uid).delete();
   }
 }
