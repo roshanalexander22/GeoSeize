@@ -58,13 +58,15 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    Color _textColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.white;
+
     final double totalAreaAllTime = _allEvents.fold(0.0, (sum, e) => sum + e.area);
     final int currentLevel = LevelSystem.getLevel(totalAreaAllTime);
     final String rankTitle = LevelSystem.getRankTitle(currentLevel);
     final double levelProgress = LevelSystem.getProgressToNextLevel(totalAreaAllTime);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D12),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -74,7 +76,7 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
           controller: _tabController,
           indicatorColor: Theme.of(context).colorScheme.secondary,
           labelColor: Theme.of(context).colorScheme.secondary,
-          unselectedLabelColor: Colors.white54,
+          unselectedLabelColor: _textColor.withValues(alpha: 0.54),
           tabs: const [
             Tab(text: 'TODAY'),
             Tab(text: 'THIS WEEK'),
@@ -108,11 +110,11 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('LVL $currentLevel', style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w900)),
+                        Text('LVL $currentLevel', style: TextStyle(color: _textColor, fontSize: 24, fontWeight: FontWeight.w900)),
                         Text(rankTitle, style: TextStyle(color: Theme.of(context).colorScheme.secondary, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
                       ],
                     ),
-                    const Icon(Icons.shield, color: Colors.white70, size: 40),
+                    Icon(Icons.shield, color: _textColor.withValues(alpha: 0.7), size: 40),
                   ],
                 ),
                 const SizedBox(height: 16),
@@ -120,13 +122,13 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
                   borderRadius: BorderRadius.circular(10),
                   child: LinearProgressIndicator(
                     value: levelProgress,
-                    backgroundColor: Colors.white10,
+                    backgroundColor: _textColor.withValues(alpha: 0.1),
                     color: Theme.of(context).colorScheme.primary,
                     minHeight: 8,
                   ),
                 ),
                 const SizedBox(height: 8),
-                Text('${(levelProgress * 100).toInt()}% TO NEXT RANK', style: const TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1)),
+                Text('${(levelProgress * 100).toInt()}% TO NEXT RANK', style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 10, letterSpacing: 1)),
               ],
             ),
           ),
@@ -151,8 +153,9 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
     final events = _getEventsForTab(tabIndex);
     
     if (events.isEmpty) {
-      return const Center(
-        child: Text('NO TERRITORIES CAPTURED\nIN THIS TIMEFRAME', textAlign: TextAlign.center, style: TextStyle(color: Colors.white30, letterSpacing: 2)),
+      Color textColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.white;
+      return Center(
+        child: Text('NO TERRITORIES CAPTURED\nIN THIS TIMEFRAME', textAlign: TextAlign.center, style: TextStyle(color: textColor.withValues(alpha: 0.3), letterSpacing: 2)),
       );
     }
 
@@ -173,7 +176,7 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
             ],
           ),
         ),
-        const Divider(color: Colors.white10, height: 32),
+        Divider(color: Theme.of(context).textTheme.bodyLarge?.color?.withValues(alpha: 0.1) ?? Colors.white10, height: 32),
         // Timeline List
         Expanded(
           child: ListView.builder(
@@ -183,7 +186,7 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
               return Container(
                 margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.05),
+                  color: Theme.of(context).textTheme.bodyLarge?.color?.withValues(alpha: 0.05) ?? Colors.white.withValues(alpha: 0.05),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: event.tierColor.withValues(alpha: 0.3)),
                 ),
@@ -196,8 +199,8 @@ class _ScoreboardScreenState extends State<ScoreboardScreen> with SingleTickerPr
                     ),
                     child: Icon(Icons.map, color: event.tierColor),
                   ),
-                  title: Text('${event.area.toStringAsFixed(1)} m²', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  subtitle: Text(DateFormat('MMM d, h:mm a').format(event.timestamp), style: const TextStyle(color: Colors.white54)),
+                  title: Text('${event.area.toStringAsFixed(1)} m²', style: TextStyle(color: Theme.of(context).textTheme.bodyLarge?.color, fontWeight: FontWeight.bold, fontSize: 18)),
+                  subtitle: Text(DateFormat('MMM d, h:mm a').format(event.timestamp), style: TextStyle(color: Theme.of(context).textTheme.bodyLarge?.color?.withValues(alpha: 0.54))),
                   trailing: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                     decoration: BoxDecoration(
@@ -225,11 +228,12 @@ class _StatWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Color textColor = Theme.of(context).textTheme.bodyLarge?.color ?? Colors.white;
     return Column(
       children: [
-        Text(value, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+        Text(value, style: TextStyle(color: textColor, fontSize: 18, fontWeight: FontWeight.bold)),
         const SizedBox(height: 4),
-        Text(label.replaceAll(RegExp(r'\(\d\)'), ''), style: const TextStyle(color: Colors.white30, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+        Text(label.replaceAll(RegExp(r'\(\d\)'), ''), style: TextStyle(color: textColor.withValues(alpha: 0.3), fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
       ],
     );
   }

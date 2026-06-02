@@ -9,6 +9,8 @@ import 'services/storage_service.dart';
 import 'utils/geo_calculator.dart';
 import 'utils/level_system.dart';
 import 'scoreboard_screen.dart';
+import 'services/settings_service.dart';
+import 'settings_screen.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -203,10 +205,32 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     });
   }
 
-  Widget _buildPlanStatItem(IconData icon, String label, String value) {
+  String _formatDistance(double meters) {
+    bool useMetric = SettingsService().useMetric.value;
+    if (useMetric) {
+      if (meters >= 1000) return '${(meters / 1000).toStringAsFixed(2)} km';
+      return '${meters.toStringAsFixed(0)} m';
+    } else {
+      double feet = meters * 3.28084;
+      if (feet >= 5280) return '${(feet / 5280).toStringAsFixed(2)} mi';
+      return '${feet.toStringAsFixed(0)} ft';
+    }
+  }
+
+  String _formatArea(double sqMeters) {
+    bool useMetric = SettingsService().useMetric.value;
+    if (useMetric) {
+      return '${sqMeters.toStringAsFixed(1)} m²';
+    } else {
+      double sqFeet = sqMeters * 10.7639;
+      return '${sqFeet.toStringAsFixed(1)} ft²';
+    }
+  }
+
+  Widget _buildPlanStatItem(IconData icon, String label, String value, Color color) {
     return Column(
       children: [
-        Icon(icon, color: Colors.cyanAccent, size: 24),
+        Icon(icon, color: color, size: 24),
         const SizedBox(height: 8),
         Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
         Text(label, style: const TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1.5)),
@@ -304,9 +328,22 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   @override
   Widget build(BuildContext context) {
     int currentLevel = LevelSystem.getLevel(_totalScore);
+    final settings = SettingsService();
 
-    return Scaffold(
-      body: Stack(
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        settings.mapStyle,
+        settings.captureColor,
+        settings.reconColor,
+        settings.useMetric,
+      ]),
+      builder: (context, _) {
+        final mapStyle = settings.mapStyle.value;
+        final capColor = settings.captureColor.value;
+        final recColor = settings.reconColor.value;
+
+        return Scaffold(
+          body: Stack(
         children: [
           if (_currentLocation == null)
             Center(
@@ -335,7 +372,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               ),
               children: [
                 TileLayer(
-                  urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                  urlTemplate: mapStyle,
                   subdomains: const ['a', 'b', 'c', 'd'],
                   userAgentPackageName: 'com.example.geoseize',
                 ),
@@ -352,7 +389,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     if (_currentPath.isNotEmpty)
                       Polyline(
                         points: _currentPath,
-                        color: Theme.of(context).colorScheme.primary,
+                        color: capColor,
                         strokeWidth: 5,
                         strokeCap: StrokeCap.round,
                         strokeJoin: StrokeJoin.round,
@@ -364,8 +401,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     polygons: [
                       Polygon(
                         points: _plannedPath,
-                        color: Colors.cyanAccent.withValues(alpha: 0.2),
-                        borderColor: Colors.cyanAccent,
+                        color: recColor.withValues(alpha: 0.2),
+                        borderColor: recColor,
                         borderStrokeWidth: 2,
                       ),
                     ],
@@ -375,13 +412,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     polylines: [
                       Polyline(
                         points: _plannedPath,
-                        color: Colors.cyanAccent,
+                        color: recColor,
                         strokeWidth: 4,
                       ),
                       if (_plannedPath.length >= 3)
                         Polyline(
                           points: [_plannedPath.last, _plannedPath.first],
-                          color: Colors.cyanAccent.withValues(alpha: 0.5),
+                          color: recColor.withValues(alpha: 0.5),
                           strokeWidth: 4,
                         ),
                     ],
@@ -394,7 +431,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       height: 12,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: Colors.cyanAccent,
+                          color: recColor,
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.black, width: 2),
                         ),
@@ -476,7 +513,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             ],
                           ),
                           const SizedBox(height: 4),
-                          Text('${_totalScore.toStringAsFixed(1)} m²', style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w800)),
+                          Text(_formatArea(_totalScore), style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w800)),
                         ],
                       ),
                       Column(
@@ -546,18 +583,42 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   ),
                 ),
                 const SizedBox(height: 16),
+                // Settings Button
+                ClipOval(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.3),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                      ),
+                      child: IconButton(
+                        icon: const Icon(Icons.settings, color: Colors.white70),
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (context) => const SettingsScreen()),
+                          );
+                        },
+                        tooltip: 'Settings',
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
                 // Recon Mode Toggle Button
                 ClipOval(
                   child: BackdropFilter(
                     filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
                     child: Container(
                       decoration: BoxDecoration(
-                        color: _isPlanningMode ? Colors.cyanAccent.withValues(alpha: 0.2) : Colors.black.withValues(alpha: 0.3),
+                        color: _isPlanningMode ? recColor.withValues(alpha: 0.2) : Colors.black.withValues(alpha: 0.3),
                         shape: BoxShape.circle,
-                        border: Border.all(color: _isPlanningMode ? Colors.cyanAccent : Colors.white.withValues(alpha: 0.1)),
+                        border: Border.all(color: _isPlanningMode ? recColor : Colors.white.withValues(alpha: 0.1)),
                       ),
                       child: IconButton(
-                        icon: Icon(Icons.explore, color: _isPlanningMode ? Colors.cyanAccent : Colors.white70),
+                        icon: Icon(Icons.explore, color: _isPlanningMode ? recColor : Colors.white70),
                         onPressed: _togglePlanningMode,
                         tooltip: 'Recon Mode',
                       ),
@@ -588,17 +649,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text(
+                        Text(
                           'RECONNAISSANCE MODE',
-                          style: TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, letterSpacing: 3),
+                          style: TextStyle(color: recColor, fontWeight: FontWeight.bold, letterSpacing: 3),
                         ),
                         const SizedBox(height: 20),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceAround,
                           children: [
-                            _buildPlanStatItem(Icons.route, 'DISTANCE', '${_plannedDistance.toStringAsFixed(0)}m'),
-                            _buildPlanStatItem(Icons.timer, 'EST. TIME', '$_plannedTimeMinutes min'),
-                            _buildPlanStatItem(Icons.square_foot, 'AREA YIELD', '${_plannedArea.toStringAsFixed(0)}m²'),
+                            _buildPlanStatItem(Icons.route, 'DISTANCE', _formatDistance(_plannedDistance), recColor),
+                            _buildPlanStatItem(Icons.timer, 'EST. TIME', '$_plannedTimeMinutes min', recColor),
+                            _buildPlanStatItem(Icons.square_foot, 'AREA YIELD', _formatArea(_plannedArea), recColor),
                           ],
                         ),
                         if (_plannedPath.isNotEmpty) ...[
@@ -674,7 +735,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
             ),
           ),
         ],
-      ),
+        ),
+        );
+      },
     );
   }
 }
