@@ -1,66 +1,57 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:latlong2/latlong.dart';
+import '../models/capture_event.dart';
 
 class StorageService {
-  static const String _territoriesKey = 'geoseize_territories';
-  static const String _totalAreaKey = 'geoseize_total_area';
+  static const String _eventsKey = 'geoseize_capture_events';
 
-  /// Saves the list of territories (polygons) to persistent storage
-  Future<void> saveTerritories(List<List<LatLng>> territories) async {
+  /// Saves the list of capture events to persistent storage
+  Future<void> saveEvents(List<CaptureEvent> events) async {
     final prefs = await SharedPreferences.getInstance();
     
-    // Convert List<List<LatLng>> to a JSON encodable format
-    List<List<Map<String, double>>> serializableTerritories = territories.map((polygon) {
-      return polygon.map((point) => {
-        'lat': point.latitude,
-        'lng': point.longitude,
-      }).toList();
-    }).toList();
-
-    String jsonString = jsonEncode(serializableTerritories);
-    await prefs.setString(_territoriesKey, jsonString);
+    List<Map<String, dynamic>> serializableEvents = events.map((e) => e.toJson()).toList();
+    String jsonString = jsonEncode(serializableEvents);
+    
+    await prefs.setString(_eventsKey, jsonString);
   }
 
-  /// Loads the list of territories from persistent storage
-  Future<List<List<LatLng>>> loadTerritories() async {
+  /// Loads the list of capture events from persistent storage
+  Future<List<CaptureEvent>> loadEvents() async {
     final prefs = await SharedPreferences.getInstance();
-    String? jsonString = prefs.getString(_territoriesKey);
+    String? jsonString = prefs.getString(_eventsKey);
     
     if (jsonString == null) return [];
 
     try {
       List<dynamic> decodedList = jsonDecode(jsonString);
-      
-      List<List<LatLng>> loadedTerritories = decodedList.map((dynamic polygonList) {
-        return (polygonList as List).map((dynamic pointMap) {
-          return LatLng(pointMap['lat'] as double, pointMap['lng'] as double);
-        }).toList();
+      return decodedList.map((dynamic jsonMap) {
+        return CaptureEvent.fromJson(jsonMap as Map<String, dynamic>);
       }).toList();
-
-      return loadedTerritories;
     } catch (e) {
-      print("Error loading territories: \$e");
+      // If we fail to decode, it might be the old format. 
+      // Wipe data gracefully to avoid crashing.
+      print("Error loading events (likely old format): \$e");
+      await wipeData();
       return [];
     }
   }
 
-  /// Saves the accumulated total area scored
-  Future<void> saveTotalArea(double totalArea) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble(_totalAreaKey, totalArea);
-  }
-
-  /// Loads the total area scored
+  /// Calculates total area from all events
   Future<double> loadTotalArea() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getDouble(_totalAreaKey) ?? 0.0;
+    final events = await loadEvents();
+    double total = 0.0;
+    for (var event in events) {
+      total += event.area;
+    }
+    return total;
   }
 
   /// Wipe all data to start over
   Future<void> wipeData() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_territoriesKey);
-    await prefs.remove(_totalAreaKey);
+    await prefs.remove(_eventsKey);
+    // Also remove the old keys just in case
+    await prefs.remove('geoseize_territories');
+    await prefs.remove('geoseize_total_area');
   }
 }
