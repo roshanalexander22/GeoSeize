@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'services/storage_service.dart';
+import 'utils/geo_calculator.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -13,9 +15,11 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
+  final StorageService _storageService = StorageService();
   
   final List<LatLng> _currentPath = [];
-  final List<List<LatLng>> _territories = [];
+  List<List<LatLng>> _territories = [];
+  double _totalScore = 0.0;
   
   StreamSubscription<Position>? _positionStream;
   bool _isCapturing = false;
@@ -26,7 +30,17 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
+    _loadData();
     _checkPermissionsAndGetLocation();
+  }
+
+  Future<void> _loadData() async {
+    final loadedTerritories = await _storageService.loadTerritories();
+    final loadedScore = await _storageService.loadTotalArea();
+    setState(() {
+      _territories = loadedTerritories;
+      _totalScore = loadedScore;
+    });
   }
   
   Future<void> _checkPermissionsAndGetLocation() async {
@@ -135,25 +149,30 @@ class _MapScreenState extends State<MapScreen> {
       
       if (distanceInMeters < 15) {
         final loopPoints = _currentPath.sublist(i).toList();
+        final double areaCaptured = GeoCalculator.calculateArea(loopPoints);
         
         setState(() {
           _territories.add(loopPoints);
+          _totalScore += areaCaptured;
           _currentPath.clear();
           _currentPath.add(newPoint);
         });
         
-        _showSuccessMessage();
+        _storageService.saveTerritories(_territories);
+        _storageService.saveTotalArea(_totalScore);
+        
+        _showSuccessMessage(areaCaptured);
         break;
       }
     }
   }
 
-  void _showSuccessMessage() {
+  void _showSuccessMessage(double area) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: const Text(
-          'Zone Captured! 🚀',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        content: Text(
+          'Zone Captured! 🚀 (+${area.toStringAsFixed(1)} m²)',
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
         ),
         backgroundColor: Colors.cyanAccent.shade700,
         behavior: SnackBarBehavior.floating,
@@ -175,6 +194,24 @@ class _MapScreenState extends State<MapScreen> {
       appBar: AppBar(
         title: const Text('GeoSeize'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () async {
+              await _storageService.wipeData();
+              if (mounted) {
+                setState(() {
+                  _territories.clear();
+                  _totalScore = 0.0;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Stats reset! Time to conquer anew!'), backgroundColor: Colors.deepPurple),
+                );
+              }
+            },
+            tooltip: 'Reset Stats',
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -237,6 +274,43 @@ class _MapScreenState extends State<MapScreen> {
                   ],
                 ),
             ],
+          ),
+          Positioned(
+            top: 16,
+            left: 16,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E).withValues(alpha: 0.9),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.5), width: 1.5),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black54, blurRadius: 10, offset: Offset(0, 4)),
+                ],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('CONQUERED AREA', style: TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                      const SizedBox(height: 4),
+                      Text('${_totalScore.toStringAsFixed(1)} m²', style: const TextStyle(color: Colors.cyanAccent, fontSize: 20, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      const Text('ZONES', style: TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                      const SizedBox(height: 4),
+                      Text('${_territories.length}', style: const TextStyle(color: Colors.deepPurpleAccent, fontSize: 20, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
           Positioned(
             bottom: 30,
