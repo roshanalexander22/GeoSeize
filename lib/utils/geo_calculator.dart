@@ -44,4 +44,16 @@ class GeoCalculator {
 
     return (area.abs() / 2.0);
   }
+
+  /// Calculates the centroid of a given polygon.
+  static LatLng getCentroid(List<LatLng> polygon) {
+    if (polygon.isEmpty) return const LatLng(0, 0);
+    double latSum = 0;
+    double lngSum = 0;
+    for (var point in polygon) {
+      latSum += point.latitude;
+      lngSum += point.longitude;
+    }
+    return LatLng(latSum / polygon.length, lngSum / polygon.length);
+  }
 }

@@ -11,6 +11,7 @@ import 'utils/level_system.dart';
 import 'scoreboard_screen.dart';
 import 'services/settings_service.dart';
 import 'settings_screen.dart';
+import 'services/auth_service.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -22,6 +23,7 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMixin {
   final MapController _mapController = MapController();
   final StorageService _storageService = StorageService();
+  String _currentUsername = 'AGENT';
   
   final List<LatLng> _currentPath = [];
   List<CaptureEvent> _events = [];
@@ -61,10 +63,23 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _loadData() async {
     final loadedEvents = await _storageService.loadEvents();
     final loadedScore = await _storageService.loadTotalArea();
-    setState(() {
-      _events = loadedEvents;
-      _totalScore = loadedScore;
-    });
+    
+    String tempUsername = 'AGENT';
+    final user = AuthService().currentUser;
+    if (user != null) {
+      final name = await AuthService().getUsername(user.uid);
+      if (name != null && name.isNotEmpty) {
+        tempUsername = name;
+      }
+    }
+    
+    if (mounted) {
+      setState(() {
+        _events = loadedEvents;
+        _totalScore = loadedScore;
+        _currentUsername = tempUsername;
+      });
+    }
   }
   
   Future<void> _checkPermissionsAndGetLocation() async {
@@ -141,7 +156,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         final loopPoints = _currentPath.sublist(i).toList();
         final double areaCaptured = GeoCalculator.calculateArea(loopPoints);
         
-        final newEvent = CaptureEvent.create(polygon: loopPoints, area: areaCaptured);
+        final newEvent = CaptureEvent.create(polygon: loopPoints, area: areaCaptured, username: _currentUsername);
 
         final int oldLevel = LevelSystem.getLevel(_totalScore);
         final int newLevel = LevelSystem.getLevel(_totalScore + areaCaptured);
@@ -383,6 +398,34 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     borderColor: event.tierColor,
                     borderStrokeWidth: 3,
                   )).toList(),
+                ),
+                MarkerLayer(
+                  markers: _events.map((event) {
+                    final centroid = GeoCalculator.getCentroid(event.polygon);
+                    return Marker(
+                      point: centroid,
+                      width: 150,
+                      height: 40,
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.6),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            event.username.toUpperCase(),
+                            style: TextStyle(
+                              color: event.tierColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
                 ),
                 PolylineLayer(
                   polylines: [
