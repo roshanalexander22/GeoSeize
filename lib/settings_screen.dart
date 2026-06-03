@@ -2,6 +2,8 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'services/settings_service.dart';
+import 'services/auth_service.dart';
+import 'main.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -12,6 +14,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final SettingsService _settings = SettingsService();
+  final AuthService _authService = AuthService();
 
   final List<Color> _availableColors = [
     const Color(0xFF6C63FF), // Default Primary
@@ -51,6 +54,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _buildSectionHeader('PROFILE'),
+            _buildProfileSection(),
+            const SizedBox(height: 24),
+
             _buildSectionHeader('APPEARANCE'),
             _buildThemeToggle(),
             const SizedBox(height: 24),
@@ -111,6 +118,183 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: child,
           ),
         ),
+      ),
+    );
+  }
+  Future<void> _changeUsername() async {
+    final controller = TextEditingController();
+    final newUsername = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Theme.of(context).colorScheme.surface,
+        title: Text('CHANGE CALLSIGN', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: controller,
+          style: TextStyle(color: _textColor),
+          decoration: InputDecoration(
+            hintText: 'New Callsign',
+            hintStyle: TextStyle(color: _textColor.withValues(alpha: 0.5)),
+            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: _textColor.withValues(alpha: 0.2))),
+            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Theme.of(context).colorScheme.secondary)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.primary),
+            child: const Text('SAVE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (newUsername != null && newUsername.isNotEmpty) {
+      final user = _authService.currentUser;
+      if (user != null) {
+        await _authService.setUsername(user.uid, newUsername);
+        setState(() {}); // trigger rebuild to show new username
+      }
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Theme.of(context).colorScheme.surface,
+        title: const Text('DELETE ACCOUNT', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+        content: Text(
+          'Are you sure you want to permanently delete your account? This action cannot be undone.',
+          style: TextStyle(color: _textColor),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('DELETE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        await _authService.deleteAccount();
+        if (mounted) {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const AuthWrapper()),
+            (route) => false,
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to delete account. Please logout, login again, and retry.'),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Widget _buildProfileSection() {
+    return _buildCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.account_circle, color: Theme.of(context).colorScheme.secondary, size: 40),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FutureBuilder<String?>(
+                      future: _authService.getUsername(_authService.currentUser?.uid ?? ''),
+                      builder: (context, snapshot) {
+                        return Text(
+                          snapshot.data?.toUpperCase() ?? 'AGENT',
+                          style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 18),
+                        );
+                      },
+                    ),
+                    Text(
+                      _authService.currentUser?.email ?? 'Unknown User',
+                      style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _changeUsername,
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(color: Theme.of(context).colorScheme.secondary.withValues(alpha: 0.5)),
+                    foregroundColor: Theme.of(context).colorScheme.secondary,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: const Text('CHANGE CALLSIGN', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () async {
+                    await _authService.signOut();
+                    if (mounted) {
+                      Navigator.of(context).pushAndRemoveUntil(
+                        MaterialPageRoute(builder: (_) => const AuthWrapper()),
+                        (route) => false,
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    foregroundColor: _textColor.withValues(alpha: 0.7),
+                    elevation: 0,
+                    side: BorderSide(color: _textColor.withValues(alpha: 0.2)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: const Text('LOGOUT', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _deleteAccount,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
+                    foregroundColor: Colors.redAccent,
+                    elevation: 0,
+                    side: BorderSide(color: Colors.redAccent.withValues(alpha: 0.3)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: const Text('DELETE', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2)),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

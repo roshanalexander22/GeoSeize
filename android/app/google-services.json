@@ -12,7 +12,20 @@
           "package_name": "com.example.geoseize"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "765403769951-9khuimoj7fion41tslm614bonoed89ff.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.geoseize",
+            "certificate_hash": "b4bf94f3921f5b302418590ecb5e2deab0f50efe"
+          }
+        },
+        {
+          "client_id": "765403769951-59uju2kd0vtnmulpm98eq5ssjvabr8vi.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyB8EFYit5ajR6qirkIV37D-JCCYfgEcMbE"
@@ -20,7 +33,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "765403769951-59uju2kd0vtnmulpm98eq5ssjvabr8vi.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "765403769951-rtamp430d0ne8ojui59ij4gdfecf8tjc.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.geoseize"
+              }
+            }
+          ]
         }
       }
     }

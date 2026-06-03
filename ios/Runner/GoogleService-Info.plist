@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>765403769951-rtamp430d0ne8ojui59ij4gdfecf8tjc.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.765403769951-rtamp430d0ne8ojui59ij4gdfecf8tjc</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>765403769951-9khuimoj7fion41tslm614bonoed89ff.apps.googleusercontent.com</string>
+	<key>API_KEY</key>
+	<string>AIzaSyBVCXtJBn2hInd9OLWkDj_7PnHsF706olA</string>
+	<key>GCM_SENDER_ID</key>
+	<string>765403769951</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.example.geoseize</string>
+	<key>PROJECT_ID</key>
+	<string>geoseize</string>
+	<key>STORAGE_BUCKET</key>
+	<string>geoseize.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:765403769951:ios:ae7d1f840c62671a757fea</string>
+</dict>
+</plist>

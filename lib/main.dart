@@ -3,7 +3,10 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/services.dart';
 import 'map_screen.dart';
 import 'loading_screen.dart';
+import 'login_screen.dart';
+import 'username_setup_screen.dart';
 import 'services/settings_service.dart';
+import 'services/auth_service.dart';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -21,14 +24,7 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
   
-  // Sign in anonymously if not already signed in
-  try {
-    if (FirebaseAuth.instance.currentUser == null) {
-      await FirebaseAuth.instance.signInAnonymously();
-    }
-  } catch (e) {
-    print("Failed to sign in anonymously. Is Anonymous Auth enabled in Firebase Console? Error: $e");
-  }
+  // Auth logic is handled via StreamBuilder down the tree
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent, // Make status bar transparent
@@ -50,7 +46,7 @@ class GeoSeizeApp extends StatelessWidget {
           title: 'GeoSeize',
           debugShowCheckedModeBanner: false,
           theme: isDark ? _buildDarkTheme(context) : _buildLightTheme(context),
-          home: const LoadingScreen(),
+          home: const AuthWrapper(),
         );
       },
     );
@@ -88,6 +84,50 @@ class GeoSeizeApp extends StatelessWidget {
         elevation: 0,
         iconTheme: IconThemeData(color: Colors.black87),
       ),
+    );
+  }
+}
+
+class AuthWrapper extends StatelessWidget {
+  const AuthWrapper({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            backgroundColor: Color(0xFF0D0D12),
+            body: Center(child: CircularProgressIndicator(color: Color(0xFF00E5FF))),
+          );
+        }
+
+        final user = snapshot.data;
+        if (user == null) {
+          return const LoginScreen();
+        }
+
+        // User is logged in, check if they have a username
+        return FutureBuilder<bool>(
+          future: AuthService().hasUsername(user.uid),
+          builder: (context, usernameSnapshot) {
+            if (usernameSnapshot.connectionState == ConnectionState.waiting) {
+              return const Scaffold(
+                backgroundColor: Color(0xFF0D0D12),
+                body: Center(child: CircularProgressIndicator(color: Color(0xFF00E5FF))),
+              );
+            }
+
+            final hasUsername = usernameSnapshot.data ?? false;
+            if (!hasUsername) {
+              return UsernameSetupScreen(user: user);
+            }
+
+            return const LoadingScreen();
+          },
+        );
+      },
     );
   }
 }

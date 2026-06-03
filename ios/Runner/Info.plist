@@ -47,5 +47,16 @@
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>This app needs access to location to track your paths and capture territories.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.765403769951-rtamp430d0ne8ojui59ij4gdfecf8tjc</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
