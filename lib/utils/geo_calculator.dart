@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:latlong2/latlong.dart';
+import 'package:clipper2/clipper2.dart';
 
 class GeoCalculator {
   static const double _earthRadius = 6378137.0; // WGS-84 equatorial radius in meters
@@ -55,5 +56,91 @@ class GeoCalculator {
       lngSum += point.longitude;
     }
     return LatLng(latSum / polygon.length, lngSum / polygon.length);
+  }
+
+  /// Checks if a point is inside any of the given polygons
+  static bool isPointInPolygons(LatLng point, List<List<LatLng>> polygons) {
+    final pt = PointD(point.longitude, point.latitude);
+    for (var poly in polygons) {
+      final pathD = <PointD>[];
+      for (var p in poly) {
+        pathD.add(PointD(p.longitude, p.latitude));
+      }
+      if (pathD.pointInPolygon(pt) != PointInPolygonResult.isOutside) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Closes and merges a newly drawn path with existing territories
+  static List<List<LatLng>> closeAndMergeTerritory(
+    List<LatLng> newPath,
+    List<List<LatLng>> existingTerritories,
+  ) {
+    if (newPath.length < 2) return existingTerritories;
+
+    // Convert newPath to PathD
+    final pathD = <PointD>[];
+    for (var p in newPath) {
+      pathD.add(PointD(p.longitude, p.latitude));
+    }
+
+    // Inflate the path to give it a physical width (approx 15 meters radius)
+    // 1 degree lat/lng is ~111,000 meters. 15 meters is ~0.000135 degrees.
+    final inflatedPaths = Clipper.inflatePathsD(
+      paths: [pathD],
+      delta: 0.000135,
+      joinType: JoinType.round,
+      endType: EndType.round,
+      precision: 7,
+    );
+
+    // Convert existing territories to PathsD
+    final existingPaths = <PathD>[];
+    for (var territory in existingTerritories) {
+      final tPath = <PointD>[];
+      for (var p in territory) {
+        tPath.add(PointD(p.longitude, p.latitude));
+      }
+      existingPaths.add(tPath);
+    }
+
+    // Union the inflated path with existing territories
+    final clipper = ClipperD(roundingDecimalPrecision: 7);
+    clipper.addPaths(inflatedPaths, PathType.subject);
+    if (existingPaths.isNotEmpty) {
+      clipper.addPaths(existingPaths, PathType.clip);
+    }
+    final tree = clipper.executeTree(ClipType.union, FillRule.nonZero)?.tree ?? PolyTreeD(scale: 1);
+
+    // Extract outer boundaries (ignore holes to capture enclosed areas)
+    final mergedPaths = <PathD>[];
+    void extractOuters(PolyPathD node) {
+      if (!node.isHole && node.polygon != null && node.polygon!.isNotEmpty) {
+        mergedPaths.add(node.polygon!);
+      }
+      for (var child in node.children) {
+        extractOuters(child);
+      }
+    }
+
+    for (var child in tree.children) {
+      extractOuters(child);
+    }
+
+    // Convert back to List<List<LatLng>>
+    final result = <List<LatLng>>[];
+    for (var p in mergedPaths) {
+      final poly = <LatLng>[];
+      for (var pt in p) {
+        poly.add(LatLng(pt.y, pt.x));
+      }
+      if (poly.isNotEmpty) {
+        result.add(poly);
+      }
+    }
+
+    return result;
   }
 }

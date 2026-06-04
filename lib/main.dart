@@ -96,36 +96,57 @@ class AuthWrapper extends StatelessWidget {
     return StreamBuilder<User?>(
       stream: FirebaseAuth.instance.authStateChanges(),
       builder: (context, snapshot) {
+        Widget currentScreen;
+        
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
+          currentScreen = const Scaffold(
+            key: ValueKey('auth_waiting'),
             backgroundColor: Color(0xFF0D0D12),
             body: Center(child: CircularProgressIndicator(color: Color(0xFF00E5FF))),
           );
+        } else {
+          final user = snapshot.data;
+          if (user == null) {
+            currentScreen = const LoginScreen(key: ValueKey('login_screen'));
+          } else {
+            // User is logged in, check if they have a username
+            currentScreen = FutureBuilder<bool>(
+              key: const ValueKey('username_check'),
+              future: AuthService().hasUsername(user.uid),
+              builder: (context, usernameSnapshot) {
+                Widget innerScreen;
+                
+                if (usernameSnapshot.connectionState == ConnectionState.waiting) {
+                  innerScreen = const Scaffold(
+                    key: ValueKey('username_waiting'),
+                    backgroundColor: Color(0xFF0D0D12),
+                    body: Center(child: CircularProgressIndicator(color: Color(0xFF00E5FF))),
+                  );
+                } else {
+                  final hasUsername = usernameSnapshot.data ?? false;
+                  if (!hasUsername) {
+                    innerScreen = UsernameSetupScreen(key: const ValueKey('username_setup'), user: user);
+                  } else {
+                    innerScreen = const LoadingScreen(key: ValueKey('loading_screen'));
+                  }
+                }
+                
+                return AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 600),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  child: innerScreen,
+                );
+              },
+            );
+          }
         }
 
-        final user = snapshot.data;
-        if (user == null) {
-          return const LoginScreen();
-        }
-
-        // User is logged in, check if they have a username
-        return FutureBuilder<bool>(
-          future: AuthService().hasUsername(user.uid),
-          builder: (context, usernameSnapshot) {
-            if (usernameSnapshot.connectionState == ConnectionState.waiting) {
-              return const Scaffold(
-                backgroundColor: Color(0xFF0D0D12),
-                body: Center(child: CircularProgressIndicator(color: Color(0xFF00E5FF))),
-              );
-            }
-
-            final hasUsername = usernameSnapshot.data ?? false;
-            if (!hasUsername) {
-              return UsernameSetupScreen(user: user);
-            }
-
-            return const LoadingScreen();
-          },
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 600),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          child: currentScreen,
         );
       },
     );

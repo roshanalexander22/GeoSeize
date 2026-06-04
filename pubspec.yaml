@@ -24,6 +24,9 @@ dependencies:
   cloud_firestore: ^6.5.0
   firebase_auth: ^6.5.2
   google_sign_in: ^7.2.0
+  clipper2: ^0.0.3
+  image_picker: ^1.2.2
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:

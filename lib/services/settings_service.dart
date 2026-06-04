@@ -13,6 +13,8 @@ class SettingsService {
   static const String _keyCaptureColor = 'captureColor';
   static const String _keyReconColor = 'reconColor';
   static const String _keyUseMetric = 'useMetric';
+  static const String _keyProfileImagePath = 'profileImagePath';
+  static const String _keyMarkerType = 'markerType';
 
   // Map Style Options
   static const String mapStyleDark = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png';
@@ -25,6 +27,8 @@ class SettingsService {
   final ValueNotifier<Color> captureColor = ValueNotifier<Color>(const Color(0xFF6C63FF)); // Theme primary
   final ValueNotifier<Color> reconColor = ValueNotifier<Color>(Colors.cyanAccent);
   final ValueNotifier<bool> useMetric = ValueNotifier<bool>(true);
+  final ValueNotifier<String?> profileImagePath = ValueNotifier<String?>(null);
+  final ValueNotifier<String> markerType = ValueNotifier<String>('default');
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -42,7 +46,10 @@ class SettingsService {
       reconColor.value = Color(reconColorInt);
     }
     
+    
     useMetric.value = prefs.getBool(_keyUseMetric) ?? true;
+    profileImagePath.value = prefs.getString(_keyProfileImagePath);
+    markerType.value = prefs.getString(_keyMarkerType) ?? 'default';
   }
 
   Future<void> setDarkTheme(bool value) async {
@@ -73,5 +80,21 @@ class SettingsService {
     useMetric.value = value;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyUseMetric, value);
+  }
+
+  Future<void> setProfileImagePath(String? path) async {
+    profileImagePath.value = path;
+    final prefs = await SharedPreferences.getInstance();
+    if (path == null) {
+      await prefs.remove(_keyProfileImagePath);
+    } else {
+      await prefs.setString(_keyProfileImagePath, path);
+    }
+  }
+
+  Future<void> setMarkerType(String type) async {
+    markerType.value = type;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyMarkerType, type);
   }
 }

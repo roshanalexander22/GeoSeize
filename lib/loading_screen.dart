@@ -3,6 +3,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'dart:math' as math;
 import 'map_screen.dart';
+import 'utils/page_transitions.dart';
 
 class LoadingScreen extends StatefulWidget {
   const LoadingScreen({super.key});
@@ -78,13 +79,7 @@ class _LoadingScreenState extends State<LoadingScreen> with SingleTickerProvider
 
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
-      PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) => const MapScreen(),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
-        transitionDuration: const Duration(milliseconds: 800),
-      ),
+      FadePageRoute(page: const MapScreen()),
     );
   }
 

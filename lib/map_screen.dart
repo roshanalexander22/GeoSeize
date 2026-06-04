@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ui';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -9,6 +10,7 @@ import 'services/storage_service.dart';
 import 'utils/geo_calculator.dart';
 import 'utils/level_system.dart';
 import 'scoreboard_screen.dart';
+import 'utils/page_transitions.dart';
 import 'services/settings_service.dart';
 import 'settings_screen.dart';
 import 'services/auth_service.dart';
@@ -145,6 +147,25 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   void _checkForLoop(LatLng newPoint) {
+    final existingTerritories = _events.map((e) => e.polygon).toList();
+    final isCurrentlyInside = GeoCalculator.isPointInPolygons(newPoint, existingTerritories);
+    
+    // Check if user re-entered territory after being outside
+    if (isCurrentlyInside && _currentPath.length > 5) {
+      bool walkedOutside = false;
+      for (int i = 0; i < _currentPath.length - 1; i++) {
+        if (!GeoCalculator.isPointInPolygons(_currentPath[i], existingTerritories)) {
+          walkedOutside = true;
+          break;
+        }
+      }
+      
+      if (walkedOutside) {
+        _performMergeCapture(existingTerritories);
+        return;
+      }
+    }
+
     if (_currentPath.length < 15) return; 
 
     // Look back at earlier points to see if we've crossed our path
@@ -154,25 +175,40 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       
       if (distanceInMeters < 15) {
         final loopPoints = _currentPath.sublist(i).toList();
-        final double areaCaptured = GeoCalculator.calculateArea(loopPoints);
-        
-        final newEvent = CaptureEvent.create(polygon: loopPoints, area: areaCaptured, username: _currentUsername);
-
-        final int oldLevel = LevelSystem.getLevel(_totalScore);
-        final int newLevel = LevelSystem.getLevel(_totalScore + areaCaptured);
-
-        setState(() {
-          _events.add(newEvent);
-          _totalScore += areaCaptured;
-          _currentPath.clear();
-          _currentPath.add(newPoint);
-        });
-        
-        _storageService.saveEvents(_events);
-        
-        _showSuccessMessage(newEvent, leveledUp: newLevel > oldLevel);
-        break;
+        _performMergeCapture(existingTerritories, customPath: loopPoints);
+        return;
       }
+    }
+  }
+
+  void _performMergeCapture(List<List<LatLng>> existingTerritories, {List<LatLng>? customPath}) {
+    final path = customPath ?? _currentPath;
+    final newPolygons = GeoCalculator.closeAndMergeTerritory(path, existingTerritories);
+    
+    double newTotalArea = 0;
+    final newEvents = <CaptureEvent>[];
+    for (var poly in newPolygons) {
+      final area = GeoCalculator.calculateArea(poly);
+      newTotalArea += area;
+      newEvents.add(CaptureEvent.create(polygon: poly, area: area, username: _currentUsername));
+    }
+
+    final int oldLevel = LevelSystem.getLevel(_totalScore);
+    final int newLevel = LevelSystem.getLevel(newTotalArea);
+
+    setState(() {
+      _events = newEvents;
+      _totalScore = newTotalArea;
+      _currentPath.clear();
+      if (customPath == null) {
+        _currentPath.add(path.last);
+      }
+    });
+    
+    _storageService.saveEvents(_events);
+    
+    if (newEvents.isNotEmpty) {
+      _showSuccessMessage(newEvents.first, leveledUp: newLevel > oldLevel);
     }
   }
 
@@ -351,6 +387,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         settings.captureColor,
         settings.reconColor,
         settings.useMetric,
+        settings.markerType,
+        settings.profileImagePath,
       ]),
       builder: (context, _) {
         final mapStyle = settings.mapStyle.value;
@@ -491,6 +529,75 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         child: AnimatedBuilder(
                           animation: _pulseAnimation,
                           builder: (context, child) {
+                            final markerType = settings.markerType.value;
+                            Widget centerWidget;
+
+                            if (markerType == 'profile') {
+                              final localPath = settings.profileImagePath.value;
+                              final googlePhotoUrl = AuthService().currentUser?.photoURL;
+                              
+                              Widget imageWidget;
+                              if (localPath != null && localPath.isNotEmpty) {
+                                imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
+                              } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
+                                imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
+                              } else {
+                                imageWidget = Icon(Icons.account_circle, color: Theme.of(context).colorScheme.secondary, size: 24);
+                              }
+                              
+                              centerWidget = Container(
+                                width: 26, height: 26,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.white, width: 2),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Theme.of(context).colorScheme.secondary,
+                                      blurRadius: 8,
+                                      spreadRadius: 2,
+                                    )
+                                  ]
+                                ),
+                                child: ClipOval(child: imageWidget),
+                              );
+                            } else if (markerType != 'default') {
+                              // Emoji avatar
+                              centerWidget = Container(
+                                width: 28, height: 28,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Colors.white.withValues(alpha: 0.9),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Theme.of(context).colorScheme.secondary,
+                                      blurRadius: 8,
+                                      spreadRadius: 2,
+                                    )
+                                  ]
+                                ),
+                                child: Center(
+                                  child: Text(markerType, style: const TextStyle(fontSize: 18)),
+                                ),
+                              );
+                            } else {
+                              // Default dot
+                              centerWidget = Container(
+                                width: 14, height: 14,
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context).colorScheme.secondary,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.white, width: 2),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Theme.of(context).colorScheme.secondary,
+                                      blurRadius: 8,
+                                      spreadRadius: 2,
+                                    )
+                                  ]
+                                ),
+                              );
+                            }
+
                             return Transform.scale(
                               scale: _pulseAnimation.value,
                               child: Container(
@@ -499,22 +606,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                                   shape: BoxShape.circle,
                                 ),
                                 child: Center(
-                                  child: Container(
-                                    width: 14,
-                                    height: 14,
-                                    decoration: BoxDecoration(
-                                      color: Theme.of(context).colorScheme.secondary,
-                                      shape: BoxShape.circle,
-                                      border: Border.all(color: Colors.white, width: 2),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Theme.of(context).colorScheme.secondary,
-                                          blurRadius: 8,
-                                          spreadRadius: 2,
-                                        )
-                                      ]
-                                    ),
-                                  ),
+                                  child: centerWidget,
                                 ),
                               ),
                             );
@@ -595,7 +687,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         onPressed: () {
                           Navigator.push(
                             context,
-                            MaterialPageRoute(builder: (context) => const ScoreboardScreen()),
+                            SlideUpPageRoute(page: const ScoreboardScreen()),
                           ).then((_) {
                             // Reload data when returning from scoreboard in case we add delete features later
                             _loadData();
@@ -641,7 +733,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         onPressed: () {
                           Navigator.push(
                             context,
-                            MaterialPageRoute(builder: (context) => const SettingsScreen()),
+                            SlideUpPageRoute(page: const SettingsScreen()),
                           );
                         },
                         tooltip: 'Settings',

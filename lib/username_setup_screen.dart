@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'services/auth_service.dart';
 import 'loading_screen.dart';
+import 'utils/page_transitions.dart';
 
 class UsernameSetupScreen extends StatefulWidget {
   final User user;
@@ -39,7 +40,7 @@ class _UsernameSetupScreenState extends State<UsernameSetupScreen> {
       if (mounted) {
         // Navigate to the loading screen which goes to the map
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const LoadingScreen()),
+          FadePageRoute(page: const LoadingScreen()),
         );
       }
     } catch (e) {

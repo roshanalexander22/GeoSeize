@@ -1,9 +1,12 @@
 import 'dart:ui';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'services/settings_service.dart';
 import 'services/auth_service.dart';
 import 'main.dart';
+import 'utils/page_transitions.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -56,6 +59,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           children: [
             _buildSectionHeader('PROFILE'),
             _buildProfileSection(),
+            const SizedBox(height: 16),
+            _buildAvatarSection(),
             const SizedBox(height: 24),
 
             _buildSectionHeader('APPEARANCE'),
@@ -190,7 +195,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         await _authService.deleteAccount();
         if (mounted) {
           Navigator.of(context).pushAndRemoveUntil(
-            MaterialPageRoute(builder: (_) => const AuthWrapper()),
+            FadePageRoute(page: const AuthWrapper()),
             (route) => false,
           );
         }
@@ -207,6 +212,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _pickImage() async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+    if (pickedFile != null) {
+      await _settings.setProfileImagePath(pickedFile.path);
+    }
+  }
+
   Widget _buildProfileSection() {
     return _buildCard(
       child: Column(
@@ -214,7 +227,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children: [
           Row(
             children: [
-              Icon(Icons.account_circle, color: Theme.of(context).colorScheme.secondary, size: 40),
+              GestureDetector(
+                onTap: _pickImage,
+                child: ValueListenableBuilder<String?>(
+                  valueListenable: _settings.profileImagePath,
+                  builder: (context, localPath, _) {
+                    final googlePhotoUrl = _authService.currentUser?.photoURL;
+                    
+                    Widget imageWidget;
+                    if (localPath != null && localPath.isNotEmpty) {
+                      imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
+                    } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
+                      imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
+                    } else {
+                      imageWidget = Icon(Icons.account_circle, color: Theme.of(context).colorScheme.secondary, size: 40);
+                    }
+
+                    return Container(
+                      width: 50,
+                      height: 50,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Theme.of(context).colorScheme.secondary, width: 2),
+                      ),
+                      child: Stack(
+                        children: [
+                          Positioned.fill(child: ClipOval(child: imageWidget)),
+                          Positioned(
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.surface,
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(Icons.edit, size: 12, color: Theme.of(context).colorScheme.secondary),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+              ),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
@@ -263,7 +319,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     await _authService.signOut();
                     if (mounted) {
                       Navigator.of(context).pushAndRemoveUntil(
-                        MaterialPageRoute(builder: (_) => const AuthWrapper()),
+                        FadePageRoute(page: const AuthWrapper()),
                         (route) => false,
                       );
                     }
@@ -293,6 +349,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAvatarSection() {
+    final List<String> avatars = ['default', 'profile', '🦆', '🚗', '✏️', '🚀', '🌟', '🍕', '👻', '👽', '🤖', '🐶', '🐱', '🦄', '💀', '🔥', '⚔️', '🛡️', '👑', '🍔'];
+
+    return _buildCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'MAP AVATAR',
+            style: TextStyle(color: _textColor.withValues(alpha: 0.5), fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 2),
+          ),
+          const SizedBox(height: 16),
+          AnimatedBuilder(
+            animation: Listenable.merge([_settings.markerType, _settings.profileImagePath]),
+            builder: (context, _) {
+              final currentMarker = _settings.markerType.value;
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: avatars.map((avatar) {
+                    final isSelected = currentMarker == avatar;
+                    Widget iconWidget;
+                    
+                    if (avatar == 'default') {
+                      iconWidget = Container(
+                        width: 28, height: 28,
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).colorScheme.secondary,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      );
+                    } else if (avatar == 'profile') {
+                      final localPath = _settings.profileImagePath.value;
+                      final googlePhotoUrl = _authService.currentUser?.photoURL;
+                      Widget imageWidget;
+                      if (localPath != null && localPath.isNotEmpty) {
+                        imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
+                      } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
+                        imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
+                      } else {
+                        imageWidget = const Icon(Icons.person, color: Colors.white, size: 18);
+                      }
+                      iconWidget = Container(
+                        width: 28, height: 28,
+                        decoration: const BoxDecoration(shape: BoxShape.circle),
+                        child: ClipOval(child: imageWidget),
+                      );
+                    } else {
+                      iconWidget = Text(avatar, style: const TextStyle(fontSize: 24));
+                    }
+
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: GestureDetector(
+                        onTap: () => _settings.setMarkerType(avatar),
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: isSelected ? Theme.of(context).colorScheme.secondary.withValues(alpha: 0.2) : Colors.transparent,
+                            border: Border.all(
+                              color: isSelected ? Theme.of(context).colorScheme.secondary : _textColor.withValues(alpha: 0.1),
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: iconWidget,
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              );
+            },
           ),
         ],
       ),
