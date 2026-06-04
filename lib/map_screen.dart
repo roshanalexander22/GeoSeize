@@ -6,10 +6,12 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'models/capture_event.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:geocoding/geocoding.dart' as geo;
 import 'services/storage_service.dart';
 import 'utils/geo_calculator.dart';
 import 'utils/level_system.dart';
-import 'scoreboard_screen.dart';
+import 'statistics_screen.dart';
 import 'utils/page_transitions.dart';
 import 'services/settings_service.dart';
 import 'settings_screen.dart';
@@ -181,16 +183,32 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
-  void _performMergeCapture(List<List<LatLng>> existingTerritories, {List<LatLng>? customPath}) {
+  Future<void> _performMergeCapture(List<List<LatLng>> existingTerritories, {List<LatLng>? customPath}) async {
     final path = customPath ?? _currentPath;
     final newPolygons = GeoCalculator.closeAndMergeTerritory(path, existingTerritories);
     
     double newTotalArea = 0;
     final newEvents = <CaptureEvent>[];
+    
+    String? regionName;
+    try {
+      final placemarks = await geo.placemarkFromCoordinates(path.first.latitude, path.first.longitude).timeout(const Duration(seconds: 3));
+      if (placemarks.isNotEmpty) {
+        final p = placemarks.first;
+        regionName = [p.locality, p.administrativeArea].where((e) => e != null && e.isNotEmpty).join(', ');
+        if (regionName.isEmpty) regionName = p.country;
+      }
+    } catch (_) {}
+
     for (var poly in newPolygons) {
       final area = GeoCalculator.calculateArea(poly);
       newTotalArea += area;
-      newEvents.add(CaptureEvent.create(polygon: poly, area: area, username: _currentUsername));
+      newEvents.add(CaptureEvent.create(
+        polygon: poly, 
+        area: area, 
+        username: _currentUsername,
+        regionName: regionName,
+      ));
     }
 
     final int oldLevel = LevelSystem.getLevel(_totalScore);
@@ -205,7 +223,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
     });
     
-    _storageService.saveEvents(_events);
+    await _storageService.saveEvents(_events);
     
     if (newEvents.isNotEmpty) {
       _showSuccessMessage(newEvents.first, leveledUp: newLevel > oldLevel);
@@ -683,17 +701,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
                       ),
                       child: IconButton(
-                        icon: const Icon(Icons.leaderboard, color: Colors.white),
+                        icon: const Icon(Icons.analytics, color: Colors.white),
                         onPressed: () {
                           Navigator.push(
                             context,
-                            SlideUpPageRoute(page: const ScoreboardScreen()),
+                            SlideUpPageRoute(page: const StatisticsScreen()),
                           ).then((_) {
-                            // Reload data when returning from scoreboard in case we add delete features later
+                            // Reload data when returning from statistics
                             _loadData();
                           });
                         },
-                        tooltip: 'Command Center',
+                        tooltip: 'Statistics',
                       ),
                     ),
                   ),

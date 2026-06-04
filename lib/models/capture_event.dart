@@ -15,6 +15,7 @@ class CaptureEvent {
   final DateTime timestamp;
   final TerritoryTier tier;
   final String username;
+  final String? regionName;
 
   CaptureEvent({
     required this.id,
@@ -23,9 +24,10 @@ class CaptureEvent {
     required this.timestamp,
     required this.tier,
     required this.username,
+    this.regionName,
   });
 
-  factory CaptureEvent.create({required List<LatLng> polygon, required double area, required String username}) {
+  factory CaptureEvent.create({required List<LatLng> polygon, required double area, required String username, String? regionName}) {
     TerritoryTier assignedTier;
     if (area < 100) {
       assignedTier = TerritoryTier.common;
@@ -44,6 +46,7 @@ class CaptureEvent {
       timestamp: DateTime.now(),
       tier: assignedTier,
       username: username,
+      regionName: regionName,
     );
   }
 
@@ -55,6 +58,7 @@ class CaptureEvent {
       'timestamp': timestamp.millisecondsSinceEpoch,
       'tier': tier.name,
       'username': username,
+      'regionName': regionName,
     };
   }
 
@@ -66,6 +70,7 @@ class CaptureEvent {
       timestamp: DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int),
       tier: TerritoryTier.values.firstWhere((e) => e.name == json['tier'], orElse: () => TerritoryTier.common),
       username: json['username'] as String? ?? 'AGENT',
+      regionName: json['regionName'] as String?,
     );
   }
 
