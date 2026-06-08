@@ -46,7 +46,16 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>This app needs access to location to track your paths and capture territories.</string>
+	<string>GeoSeize needs your location to track paths and capture territories.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>GeoSeize needs your location even in the background to keep tracking your territory journey.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>GeoSeize needs your location to track paths and capture territories in the background.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>GeoSeize needs access to your photo library to set your profile avatar.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>GeoSeize needs camera access to take a profile photo.</string>
+
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

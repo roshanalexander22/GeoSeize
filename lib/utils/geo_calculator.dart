@@ -46,7 +46,117 @@ class GeoCalculator {
     return (area.abs() / 2.0);
   }
 
-  /// Calculates the centroid of a given polygon.
+  /// Returns the **visual center** of a polygon — the point that is furthest
+  /// from all edges (pole of inaccessibility). This is ALWAYS inside the polygon,
+  /// even for concave shapes and fused/merged territories.
+  ///
+  /// Uses a fast grid-sampling approach: subdivide the bounding box into a grid,
+  /// keep only cells whose centers are inside the polygon, pick the one whose
+  /// minimum distance to any edge is greatest.
+  static LatLng getVisualCenter(List<LatLng> polygon) {
+    if (polygon.isEmpty) return const LatLng(0, 0);
+    if (polygon.length < 3) return polygon.first;
+
+    // Bounding box
+    double minLat = polygon.first.latitude;
+    double maxLat = polygon.first.latitude;
+    double minLng = polygon.first.longitude;
+    double maxLng = polygon.first.longitude;
+    for (var p in polygon) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+
+    final latRange = maxLat - minLat;
+    final lngRange = maxLng - minLng;
+    // Grid resolution: 10 steps per side (100 candidates max — very fast)
+    const steps = 10;
+    final latStep = latRange / steps;
+    final lngStep = lngRange / steps;
+
+    LatLng? bestPoint;
+    double bestDist = -1;
+
+    for (int i = 0; i <= steps; i++) {
+      for (int j = 0; j <= steps; j++) {
+        final candidate = LatLng(
+          minLat + latStep * i + latStep * 0.5,
+          minLng + lngStep * j + lngStep * 0.5,
+        );
+
+        // Only consider points inside the polygon
+        if (!_pointInPolygon(candidate, polygon)) continue;
+
+        // Find minimum distance to any edge (in degrees — sufficient for ranking)
+        double minEdgeDist = double.infinity;
+        for (int k = 0; k < polygon.length; k++) {
+          final p1 = polygon[k];
+          final p2 = polygon[(k + 1) % polygon.length];
+          final d = _pointToSegmentDistSq(candidate, p1, p2);
+          if (d < minEdgeDist) minEdgeDist = d;
+        }
+
+        if (minEdgeDist > bestDist) {
+          bestDist = minEdgeDist;
+          bestPoint = candidate;
+        }
+      }
+    }
+
+    // Fallback to simple average if grid found nothing (degenerate polygon)
+    if (bestPoint == null) {
+      double latSum = 0, lngSum = 0;
+      for (var p in polygon) { latSum += p.latitude; lngSum += p.longitude; }
+      return LatLng(latSum / polygon.length, lngSum / polygon.length);
+    }
+    return bestPoint;
+  }
+
+  /// Returns a font size for the zone label scaled to the zone's area.
+  /// Tiny zones get size 8, large zones scale up to size 22.
+  static double getZoneLabelFontSize(double areaM2) {
+    // Scale: 50 m² → 8pt,  5000 m² → 18pt, 50000 m² → 22pt
+    const minSize = 8.0;
+    const maxSize = 22.0;
+    if (areaM2 <= 0) return minSize;
+    // Logarithmic scale so small zones aren't tiny and huge zones aren't massive
+    final t = (math.log(areaM2.clamp(50, 50000)) - math.log(50)) /
+              (math.log(50000) - math.log(50));
+    return minSize + (maxSize - minSize) * t.clamp(0.0, 1.0);
+  }
+
+  // Ray-casting point-in-polygon test (lat/lng degrees)
+  static bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+    bool inside = false;
+    for (int i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final xi = polygon[i].longitude, yi = polygon[i].latitude;
+      final xj = polygon[j].longitude, yj = polygon[j].latitude;
+      if (((yi > point.latitude) != (yj > point.latitude)) &&
+          (point.longitude < (xj - xi) * (point.latitude - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  // Squared distance from point P to segment AB (in degrees — for ranking only)
+  static double _pointToSegmentDistSq(LatLng p, LatLng a, LatLng b) {
+    double ax = a.longitude, ay = a.latitude;
+    double bx = b.longitude, by = b.latitude;
+    double px = p.longitude, py = p.latitude;
+    double dx = bx - ax, dy = by - ay;
+    final lenSq = dx * dx + dy * dy;
+    double t = lenSq == 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq;
+    t = t.clamp(0.0, 1.0);
+    final nearX = ax + t * dx, nearY = ay + t * dy;
+    final diffX = px - nearX, diffY = py - nearY;
+    return diffX * diffX + diffY * diffY;
+  }
+
+  /// Calculates the centroid of a given polygon (simple average — may fall outside concave shapes).
+  /// Prefer [getVisualCenter] for label placement.
   static LatLng getCentroid(List<LatLng> polygon) {
     if (polygon.isEmpty) return const LatLng(0, 0);
     double latSum = 0;
@@ -73,74 +183,5 @@ class GeoCalculator {
     return false;
   }
 
-  /// Closes and merges a newly drawn path with existing territories
-  static List<List<LatLng>> closeAndMergeTerritory(
-    List<LatLng> newPath,
-    List<List<LatLng>> existingTerritories,
-  ) {
-    if (newPath.length < 2) return existingTerritories;
-
-    // Convert newPath to PathD
-    final pathD = <PointD>[];
-    for (var p in newPath) {
-      pathD.add(PointD(p.longitude, p.latitude));
-    }
-
-    // Inflate the path to give it a physical width (approx 15 meters radius)
-    // 1 degree lat/lng is ~111,000 meters. 15 meters is ~0.000135 degrees.
-    final inflatedPaths = Clipper.inflatePathsD(
-      paths: [pathD],
-      delta: 0.000135,
-      joinType: JoinType.round,
-      endType: EndType.round,
-      precision: 7,
-    );
-
-    // Convert existing territories to PathsD
-    final existingPaths = <PathD>[];
-    for (var territory in existingTerritories) {
-      final tPath = <PointD>[];
-      for (var p in territory) {
-        tPath.add(PointD(p.longitude, p.latitude));
-      }
-      existingPaths.add(tPath);
-    }
-
-    // Union the inflated path with existing territories
-    final clipper = ClipperD(roundingDecimalPrecision: 7);
-    clipper.addPaths(inflatedPaths, PathType.subject);
-    if (existingPaths.isNotEmpty) {
-      clipper.addPaths(existingPaths, PathType.clip);
-    }
-    final tree = clipper.executeTree(ClipType.union, FillRule.nonZero)?.tree ?? PolyTreeD(scale: 1);
-
-    // Extract outer boundaries (ignore holes to capture enclosed areas)
-    final mergedPaths = <PathD>[];
-    void extractOuters(PolyPathD node) {
-      if (!node.isHole && node.polygon != null && node.polygon!.isNotEmpty) {
-        mergedPaths.add(node.polygon!);
-      }
-      for (var child in node.children) {
-        extractOuters(child);
-      }
-    }
-
-    for (var child in tree.children) {
-      extractOuters(child);
-    }
-
-    // Convert back to List<List<LatLng>>
-    final result = <List<LatLng>>[];
-    for (var p in mergedPaths) {
-      final poly = <LatLng>[];
-      for (var pt in p) {
-        poly.add(LatLng(pt.y, pt.x));
-      }
-      if (poly.isNotEmpty) {
-        result.add(poly);
-      }
-    }
-
-    return result;
-  }
 }
+

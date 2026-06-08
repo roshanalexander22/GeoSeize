@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
-import 'dart:io';
+import 'dart:io' show File, Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -10,6 +11,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:geocoding/geocoding.dart' as geo;
 import 'services/storage_service.dart';
 import 'utils/geo_calculator.dart';
+import 'utils/capture_engine.dart';
 import 'utils/level_system.dart';
 import 'statistics_screen.dart';
 import 'utils/page_transitions.dart';
@@ -24,7 +26,7 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMixin {
+class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   final MapController _mapController = MapController();
   final StorageService _storageService = StorageService();
   String _currentUsername = 'AGENT';
@@ -47,6 +49,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+
+  // Smooth marker movement
+  AnimationController? _markerAnimController;
+  Animation<double>? _animatedLat;
+  Animation<double>? _animatedLng;
+  LatLng? _displayLocation; // interpolated position used for rendering
+  bool _followingUser = true; // whether the camera auto-follows the marker
   
   @override
   void initState() {
@@ -62,6 +71,25 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.5).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    // Marker position animation — slides between GPS fixes instead of jumping
+    _markerAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _markerAnimController!.addListener(() {
+      if (!mounted) return;
+      final lat = _animatedLat?.value;
+      final lng = _animatedLng?.value;
+      if (lat != null && lng != null) {
+        final pos = LatLng(lat, lng);
+        setState(() { _displayLocation = pos; });
+        // Only move the camera if the user hasn't manually panned away
+        if (_followingUser && _mapController.camera.zoom > 0) {
+          _mapController.move(pos, _mapController.camera.zoom);
+        }
+      }
+    });
   }
 
   Future<void> _loadData() async {
@@ -91,9 +119,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       // LoadingScreen has already guaranteed we have permissions and GPS is active!
       Position position = await Geolocator.getCurrentPosition();
       if (mounted) {
+        final initialLoc = LatLng(position.latitude, position.longitude);
         setState(() {
-          _currentLocation = LatLng(position.latitude, position.longitude);
+          _currentLocation = initialLoc;
+          _displayLocation = initialLoc; // show marker immediately
         });
+        // Do NOT call _mapController.move() here — FlutterMap hasn't
+        // rendered yet (still showing the loading spinner).
+        // The map uses initialCenter: _currentLocation! so it centres itself.
       }
     } catch (e) {
       if (mounted) {
@@ -102,6 +135,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         );
       }
     }
+    // Start the always-on stream so the blue dot moves continuously.
+    // Path recording only happens when _isCapturing is true (guarded inside _onNewGpsPoint).
+    _initLocationStream();
   }
 
   void _toggleCapture() {
@@ -116,116 +152,306 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     setState(() {
       _isCapturing = true;
       _currentPath.clear();
+      _captureInProgress = false;
+      _hasBeenOutside    = false;
       if (_currentLocation != null) {
         _currentPath.add(_currentLocation!);
       }
     });
+    // Stream is already running (started in _checkPermissionsAndGetLocation).
+    // No need to start a second one.
+  }
+
+  void _initLocationStream() {
+    // Cancel any existing stream first (idempotent)
+    _positionStream?.cancel();
+
+    LocationSettings locationSettings;
+    if (kIsWeb) {
+      // Web uses the browser Geolocation API — no Android/Apple specifics.
+      locationSettings = const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+      );
+    } else if (Platform.isAndroid) {
+      locationSettings = AndroidSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+        forceLocationManager: false,
+      );
+    } else if (Platform.isIOS || Platform.isMacOS) {
+      locationSettings = AppleSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+        activityType: ActivityType.fitness,
+        pauseLocationUpdatesAutomatically: false,
+      );
+    } else {
+      // Linux / Windows — geolocator has no native support; use generic
+      // settings and let the error handler show a graceful message.
+      locationSettings = const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+      );
+    }
+
+    // Kalman-style smoothing state (exponential moving average)
+    double? _smoothLat;
+    double? _smoothLng;
+    const double alpha = 0.4; // 0 = max smoothing, 1 = raw GPS
+
+    // Speed validation: track last accepted position + timestamp
+    LatLng? _lastAcceptedPoint;
+    DateTime? _lastAcceptedTime;
 
     _positionStream = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 3, 
-      ),
+      locationSettings: locationSettings,
     ).listen((Position position) {
-      final newPoint = LatLng(position.latitude, position.longitude);
-      
-      setState(() {
-        _currentLocation = newPoint;
-        if (_isCapturing) {
-          _currentPath.add(newPoint);
-          _checkForLoop(newPoint);
+      // ── Gate 1: Accuracy ─────────────────────────────────────────────────
+      if (position.accuracy > 8.0) return;
+
+      // ── Gate 2: Speed Validation ─────────────────────────────────────────
+      final rawSpeed = position.speed < 0 ? 0.0 : position.speed;
+      if (rawSpeed > 8.0) return;
+
+      final currentRaw = LatLng(position.latitude, position.longitude);
+      if (_lastAcceptedPoint != null && _lastAcceptedTime != null) {
+        final elapsed = DateTime.now().difference(_lastAcceptedTime!).inMilliseconds;
+        if (elapsed > 0) {
+          final jumped = const Distance().as(LengthUnit.Meter, _lastAcceptedPoint!, currentRaw);
+          final impliedSpeed = jumped / (elapsed / 1000.0);
+          if (impliedSpeed > 8.0) return;
         }
-      });
-      _mapController.move(newPoint, _mapController.camera.zoom);
+      }
+      _lastAcceptedPoint = currentRaw;
+      _lastAcceptedTime  = DateTime.now();
+
+      // ── Gate 3: Stationary Detection ─────────────────────────────────────
+      final isStationary = rawSpeed < 0.4;
+
+      // ── EMA Smoother ─────────────────────────────────────────────────────
+      _smoothLat = _smoothLat == null
+          ? position.latitude
+          : alpha * position.latitude + (1 - alpha) * _smoothLat!;
+      _smoothLng = _smoothLng == null
+          ? position.longitude
+          : alpha * position.longitude + (1 - alpha) * _smoothLng!;
+
+      final smoothed = LatLng(_smoothLat!, _smoothLng!);
+
+      _currentLocation = smoothed;
+
+      if (_displayLocation == null) {
+        setState(() { _displayLocation = smoothed; });
+        _mapController.move(smoothed, _mapController.camera.zoom);
+      } else {
+        _animateMarkerTo(smoothed);
+      }
+
+      if (_isCapturing && !isStationary) _onNewGpsPoint(smoothed);
     });
   }
+
+
 
   void _stopCapturing() {
-    _positionStream?.cancel();
     setState(() {
-      _isCapturing = false;
+      _isCapturing       = false;
       _currentPath.clear();
+      _captureInProgress = false;
+      _hasBeenOutside    = false;
     });
+    // Keep the stream alive so the marker keeps moving between captures.
   }
 
-  void _checkForLoop(LatLng newPoint) {
-    final existingTerritories = _events.map((e) => e.polygon).toList();
-    final isCurrentlyInside = GeoCalculator.isPointInPolygons(newPoint, existingTerritories);
-    
-    // Check if user re-entered territory after being outside
-    if (isCurrentlyInside && _currentPath.length > 5) {
-      bool walkedOutside = false;
-      for (int i = 0; i < _currentPath.length - 1; i++) {
-        if (!GeoCalculator.isPointInPolygons(_currentPath[i], existingTerritories)) {
-          walkedOutside = true;
-          break;
-        }
+  // ── State for the new engine ───────────────────────────────────────────────
+  bool _captureInProgress = false;
+  bool _hasBeenOutside    = false; // cached: did path ever leave all zones?
+
+  // ── Main entry-point called for every smoothed GPS point ──────────────────
+  void _onNewGpsPoint(LatLng smoothed) {
+    if (_captureInProgress) return;
+
+    // First point: just seed the path
+    if (_currentPath.isEmpty) {
+      setState(() { _currentPath.add(smoothed); });
+      return;
+    }
+
+    // Minimum movement gate (3 m) to suppress standing-still noise
+    final dist = const Distance().as(LengthUnit.Meter, _currentPath.last, smoothed);
+    if (dist < 3.0) return;
+
+    final prev  = _currentPath.last;
+    final zones = _events.map((e) => e.polygon).toList();
+
+    // Update _hasBeenOutside lazily (set once, never cleared until next capture)
+    if (!_hasBeenOutside && zones.isNotEmpty) {
+      if (!GeoCalculator.isPointInPolygons(smoothed, zones)) {
+        _hasBeenOutside = true;
       }
-      
-      if (walkedOutside) {
-        _performMergeCapture(existingTerritories);
+    }
+
+    // ── Case 3A/3B/4/8: Zone-boundary crossing ───────────────────────────────
+    if (zones.isNotEmpty && _hasBeenOutside) {
+      final zoneCross = CaptureEngine.checkZoneCrossing(prev, smoothed, zones);
+      if (zoneCross != null) {
+        _triggerZoneCrossCapture(zoneCross.crossPoint, zones);
         return;
       }
     }
 
-    if (_currentPath.length < 15) return; 
-
-    // Look back at earlier points to see if we've crossed our path
-    for (int i = 0; i < _currentPath.length - 10; i++) {
-      final oldPoint = _currentPath[i];
-      final distanceInMeters = _distance.as(LengthUnit.Meter, newPoint, oldPoint);
-      
-      if (distanceInMeters < 15) {
-        final loopPoints = _currentPath.sublist(i).toList();
-        _performMergeCapture(existingTerritories, customPath: loopPoints);
+    // ── Case 1/2/6: Self-intersection ────────────────────────────────────────
+    // Require at least 15 points recorded before checking, and skip the
+    // 10 most-recent segments, to prevent false triggers on straight walks.
+    if (_currentPath.length >= 15) {
+      final selfCross = CaptureEngine.checkSelfIntersection(
+          prev, smoothed, _currentPath, skipRecent: 10);
+      if (selfCross != null) {
+        _triggerSelfIntersectCapture(
+            selfCross.crossPoint, selfCross.segmentIndex, zones);
         return;
       }
     }
+
+    setState(() { _currentPath.add(smoothed); });
   }
 
-  Future<void> _performMergeCapture(List<List<LatLng>> existingTerritories, {List<LatLng>? customPath}) async {
-    final path = customPath ?? _currentPath;
-    final newPolygons = GeoCalculator.closeAndMergeTerritory(path, existingTerritories);
-    
+  // ── Self-intersection capture (Cases 1, 2, 6) ─────────────────────────────
+  void _triggerSelfIntersectCapture(
+      LatLng crossPoint, int segmentIndex, List<List<LatLng>> zones) {
+    // The closed loop = crossPoint + path[segmentIndex+1 .. end] + crossPoint
+    final polygon = <LatLng>[crossPoint];
+    for (int i = segmentIndex + 1; i < _currentPath.length; i++) {
+      polygon.add(_currentPath[i]);
+    }
+    polygon.add(crossPoint);
+
+    // The journey before the crossing continues as the next capture session
+    final remaining = _currentPath.sublist(0, segmentIndex + 1).toList()
+      ..add(crossPoint);
+
+    _executeCapture(polygon, zones, remainingPath: remaining);
+  }
+
+  // ── Zone re-entry capture (Cases 3A, 3B, 4, 8) ───────────────────────────
+  void _triggerZoneCrossCapture(LatLng crossPoint, List<List<LatLng>> zones) {
+    // Find the last path point that was inside a zone (the "last inside" anchor)
+    int anchorIdx = 0;
+    for (int i = _currentPath.length - 1; i >= 0; i--) {
+      if (GeoCalculator.isPointInPolygons(_currentPath[i], zones)) {
+        anchorIdx = i;
+        break;
+      }
+    }
+
+    // Build capture polygon:
+    //   anchorPoint (inside zone) → outside path → crossPoint (back at boundary)
+    final polygon = <LatLng>[_currentPath[anchorIdx]];
+    for (int i = anchorIdx + 1; i < _currentPath.length; i++) {
+      polygon.add(_currentPath[i]);
+    }
+    polygon.add(crossPoint);
+    polygon.add(_currentPath[anchorIdx]); // close
+
+    _executeCapture(polygon, zones, remainingPath: [crossPoint]);
+  }
+
+  // ── Execute a capture: resolve → save → update UI ─────────────────────────
+  Future<void> _executeCapture(
+      List<LatLng> polygon,
+      List<List<LatLng>> zones,
+      {List<LatLng>? remainingPath}) async {
+    _captureInProgress = true;
+
+    final newZones = CaptureEngine.resolveCapture(polygon, zones);
+
+    // Case 5: nested loop — no new area added (same list reference)
+    if (identical(newZones, zones)) {
+      setState(() {
+        _currentPath.clear();
+        if (remainingPath != null) _currentPath.addAll(remainingPath);
+        _hasBeenOutside = false;
+      });
+      _captureInProgress = false;
+      return;
+    }
+
+    // Compute total area of the merged result
     double newTotalArea = 0;
-    final newEvents = <CaptureEvent>[];
-    
-    String? regionName;
-    try {
-      final placemarks = await geo.placemarkFromCoordinates(path.first.latitude, path.first.longitude).timeout(const Duration(seconds: 3));
-      if (placemarks.isNotEmpty) {
-        final p = placemarks.first;
-        regionName = [p.locality, p.administrativeArea].where((e) => e != null && e.isNotEmpty).join(', ');
-        if (regionName.isEmpty) regionName = p.country;
-      }
-    } catch (_) {}
+    for (final z in newZones) {
+      newTotalArea += GeoCalculator.calculateArea(z);
+    }
 
-    for (var poly in newPolygons) {
-      final area = GeoCalculator.calculateArea(poly);
-      newTotalArea += area;
+    // If the area barely changed (< 1 m²) also treat as nested loop
+    if (newTotalArea - _totalScore < 1.0) {
+      setState(() {
+        _currentPath.clear();
+        if (remainingPath != null) _currentPath.addAll(remainingPath);
+        _hasBeenOutside = false;
+      });
+      _captureInProgress = false;
+      return;
+    }
+
+    // Reverse-geocode — not available on web or Linux/Windows.
+    String? regionName;
+    final supportsGeocoding = !kIsWeb &&
+        (Platform.isAndroid || Platform.isIOS || Platform.isMacOS);
+    if (supportsGeocoding) {
+      try {
+        final placemarks = await geo.placemarkFromCoordinates(
+          polygon.first.latitude, polygon.first.longitude,
+        ).timeout(const Duration(seconds: 3));
+        if (placemarks.isNotEmpty) {
+          final p = placemarks.first;
+          regionName = [p.locality, p.administrativeArea]
+              .where((e) => e != null && e.isNotEmpty)
+              .join(', ');
+          if (regionName.isEmpty) regionName = p.country;
+        }
+      } catch (_) {}
+    }
+
+    final newEvents = <CaptureEvent>[];
+    for (final z in newZones) {
+      final area = GeoCalculator.calculateArea(z);
       newEvents.add(CaptureEvent.create(
-        polygon: poly, 
-        area: area, 
+        polygon: z,
+        area: area,
         username: _currentUsername,
         regionName: regionName,
+        playerTotalScore: newTotalArea,
       ));
     }
 
     final int oldLevel = LevelSystem.getLevel(_totalScore);
     final int newLevel = LevelSystem.getLevel(newTotalArea);
 
+    if (!mounted) { _captureInProgress = false; return; }
+
     setState(() {
-      _events = newEvents;
+      _events     = newEvents;
       _totalScore = newTotalArea;
       _currentPath.clear();
-      if (customPath == null) {
-        _currentPath.add(path.last);
+      if (remainingPath != null && remainingPath.isNotEmpty) {
+        _currentPath.addAll(remainingPath);
+      } else if (polygon.isNotEmpty) {
+        _currentPath.add(polygon.last);
       }
+      _hasBeenOutside = false;
     });
-    
+
     await _storageService.saveEvents(_events);
-    
-    if (newEvents.isNotEmpty) {
+    // Record this journey's net area gain for per-journey statistics
+    final journeyGain = newTotalArea - _totalScore;
+    if (journeyGain > 1.0) {
+      await _storageService.addJourneyArea(journeyGain);
+    }
+    _captureInProgress = false;
+
+
+    if (newEvents.isNotEmpty && mounted) {
       _showSuccessMessage(newEvents.first, leveledUp: newLevel > oldLevel);
     }
   }
@@ -387,10 +613,22 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
+  // Animate the player dot smoothly from its current display position to [target]
+  void _animateMarkerTo(LatLng target) {
+    final from = _displayLocation ?? target;
+    _markerAnimController!.stop();
+    _animatedLat = Tween<double>(begin: from.latitude,  end: target.latitude)
+        .animate(CurvedAnimation(parent: _markerAnimController!, curve: Curves.easeOut));
+    _animatedLng = Tween<double>(begin: from.longitude, end: target.longitude)
+        .animate(CurvedAnimation(parent: _markerAnimController!, curve: Curves.easeOut));
+    _markerAnimController!.forward(from: 0.0);
+  }
+
   @override
   void dispose() {
     _positionStream?.cancel();
     _pulseController.dispose();
+    _markerAnimController?.dispose();
     super.dispose();
   }
 
@@ -402,16 +640,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     return AnimatedBuilder(
       animation: Listenable.merge([
         settings.mapStyle,
-        settings.captureColor,
         settings.reconColor,
         settings.useMetric,
         settings.markerType,
         settings.profileImagePath,
+        settings.selectedColorIndex,
       ]),
       builder: (context, _) {
         final mapStyle = settings.mapStyle.value;
-        final capColor = settings.captureColor.value;
         final recColor = settings.reconColor.value;
+
+        final playerColor = settings.selectedColor;
 
         return Scaffold(
           body: Stack(
@@ -440,6 +679,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                 initialCenter: _currentLocation!,
                 initialZoom: 16.5,
                 onTap: _handleMapTap,
+                onPositionChanged: (camera, hasGesture) {
+                  // User manually panned — stop auto-following until recalibrated
+                  if (hasGesture && _followingUser) {
+                    setState(() { _followingUser = false; });
+                  }
+                },
               ),
               children: [
                 TileLayer(
@@ -450,33 +695,52 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                 PolygonLayer(
                   polygons: _events.map((event) => Polygon(
                     points: event.polygon,
-                    color: event.tierColor.withValues(alpha: 0.25),
-                    borderColor: event.tierColor,
+                    color: playerColor.withValues(alpha: 0.25),
+                    borderColor: playerColor,
                     borderStrokeWidth: 3,
                   )).toList(),
                 ),
                 MarkerLayer(
                   markers: _events.map((event) {
-                    final centroid = GeoCalculator.getCentroid(event.polygon);
+                    // getVisualCenter is always inside the polygon, even for
+                    // concave or fused L-shaped / T-shaped zones.
+                    final center = GeoCalculator.getVisualCenter(event.polygon);
+                    final fontSize = GeoCalculator.getZoneLabelFontSize(event.area);
+                    // Scale the marker widget width proportionally so text always fits
+                    final markerWidth = (fontSize * event.username.length * 0.75).clamp(80.0, 300.0);
                     return Marker(
-                      point: centroid,
-                      width: 150,
-                      height: 40,
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.6),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
+                      point: center,
+                      width: markerWidth,
+                      height: fontSize + 12,
+                      child: GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            SlideUpPageRoute(
+                              page: StatisticsScreen(
+                                // Pass the zone owner's username.
+                                // When multiplayer launches, swap this for a userId
+                                // and load that user's data from Firestore.
+                                ownerUsername: event.username,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Center(
                           child: Text(
                             event.username.toUpperCase(),
                             style: TextStyle(
-                              color: event.tierColor,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w900,
+                              fontSize: fontSize,
+                              shadows: [
+                                const Shadow(blurRadius: 4.0, color: Colors.black),
+                                Shadow(blurRadius: 8.0, color: playerColor),
+                                Shadow(blurRadius: 12.0, color: playerColor),
+                              ],
                             ),
                             overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
                           ),
                         ),
                       ),
@@ -488,7 +752,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     if (_currentPath.isNotEmpty)
                       Polyline(
                         points: _currentPath,
-                        color: capColor,
+                        color: playerColor,
                         strokeWidth: 5,
                         strokeCap: StrokeCap.round,
                         strokeJoin: StrokeJoin.round,
@@ -537,11 +801,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       ),
                     )).toList(),
                   ),
-                if (_currentLocation != null)
+                if (_displayLocation != null)
                   MarkerLayer(
                     markers: [
                       Marker(
-                        point: _currentLocation!,
+                        point: _displayLocation!,
                         width: 40,
                         height: 40,
                         child: AnimatedBuilder(
@@ -555,7 +819,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                               final googlePhotoUrl = AuthService().currentUser?.photoURL;
                               
                               Widget imageWidget;
-                              if (localPath != null && localPath.isNotEmpty) {
+                              if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
                                 imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
                               } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
                                 imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
@@ -736,6 +1000,39 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   ),
                 ),
                 const SizedBox(height: 16),
+                // Calibrate GPS Button
+                ClipOval(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.3),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                      ),
+                      child: IconButton(
+                        icon: const Icon(Icons.my_location, color: Colors.white70),
+                        onPressed: () async {
+                          final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.best);
+                          final pt = LatLng(pos.latitude, pos.longitude);
+                          setState(() {
+                            _currentLocation  = pt;
+                            _displayLocation  = pt;
+                            _followingUser    = true; // re-enable camera follow
+                          });
+                          _mapController.move(pt, _mapController.camera.zoom);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Location Refreshed — following you again!')),
+                            );
+                          }
+                        },
+                        tooltip: 'Calibrate GPS',
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
                 // Settings Button
                 ClipOval(
                   child: BackdropFilter(
@@ -751,7 +1048,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         onPressed: () {
                           Navigator.push(
                             context,
-                            SlideUpPageRoute(page: const SettingsScreen()),
+                            SlideUpPageRoute(page: SettingsScreen(totalScore: _totalScore)),
                           );
                         },
                         tooltip: 'Settings',

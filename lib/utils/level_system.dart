@@ -25,6 +25,17 @@ class LevelSystem {
     "Geo Master"
   ];
 
+  /// Total number of defined levels.
+  static int get maxLevel => _xpRequirements.length;
+
+  /// Minimum area (m²) required to reach [level] (1-indexed).
+  static double getMinAreaForLevel(int level) {
+    final idx = (level - 1).clamp(0, _xpRequirements.length - 1);
+    return _xpRequirements[idx].toDouble();
+  }
+
+
+
   /// Returns the player's current level (1-indexed) based on total area captured.
   static int getLevel(double totalArea) {
     for (int i = _xpRequirements.length - 1; i >= 0; i--) {

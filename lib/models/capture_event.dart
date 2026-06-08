@@ -27,13 +27,21 @@ class CaptureEvent {
     this.regionName,
   });
 
-  factory CaptureEvent.create({required List<LatLng> polygon, required double area, required String username, String? regionName}) {
+  factory CaptureEvent.create({
+    required List<LatLng> polygon,
+    required double area,
+    required String username,
+    String? regionName,
+    double playerTotalScore = 0,
+  }) {
+    // Tier is based on the PLAYER's overall total captured area — not per-zone.
+    // This ensures all zones share one consistent color at any point in time.
     TerritoryTier assignedTier;
-    if (area < 100) {
+    if (playerTotalScore < 500) {
       assignedTier = TerritoryTier.common;
-    } else if (area < 500) {
+    } else if (playerTotalScore < 5000) {
       assignedTier = TerritoryTier.rare;
-    } else if (area < 2000) {
+    } else if (playerTotalScore < 20000) {
       assignedTier = TerritoryTier.epic;
     } else {
       assignedTier = TerritoryTier.legendary;

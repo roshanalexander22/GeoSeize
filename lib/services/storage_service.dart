@@ -11,34 +11,28 @@ class StorageService {
   /// Saves the list of capture events to Firestore
   Future<void> saveEvents(List<CaptureEvent> events) async {
     final uid = _userId;
-    if (uid == null) return; // Not logged in
-    
-    // We save all events in a single document array to minimize Firestore write costs
-    List<Map<String, dynamic>> serializableEvents = events.map((e) => e.toJson()).toList();
-    
+    if (uid == null) return;
+    final serializableEvents = events.map((e) => e.toJson()).toList();
     await _db.collection('users').doc(uid).set({
-      'events': serializableEvents
-    });
+      'events': serializableEvents,
+    }, SetOptions(merge: true));
   }
 
   /// Loads the list of capture events from Firestore
   Future<List<CaptureEvent>> loadEvents() async {
     final uid = _userId;
     if (uid == null) return [];
-
     try {
       final doc = await _db.collection('users').doc(uid).get();
       if (!doc.exists || doc.data() == null) return [];
-      
       final data = doc.data()!;
       if (data['events'] == null) return [];
-
-      List<dynamic> eventsList = data['events'];
-      return eventsList.map((dynamic jsonMap) {
-        return CaptureEvent.fromJson(jsonMap as Map<String, dynamic>);
-      }).toList();
+      final eventsList = data['events'] as List<dynamic>;
+      return eventsList
+          .map((json) => CaptureEvent.fromJson(json as Map<String, dynamic>))
+          .toList();
     } catch (e) {
-      print("Error loading events from Firestore: $e");
+      print('Error loading events from Firestore: $e');
       return [];
     }
   }
@@ -46,18 +40,44 @@ class StorageService {
   /// Calculates total area from all events
   Future<double> loadTotalArea() async {
     final events = await loadEvents();
-    double total = 0.0;
-    for (var event in events) {
-      total += event.area;
-    }
-    return total;
+    return events.fold<double>(0.0, (sum, e) => sum + e.area);
+
   }
 
-  /// Wipe all data to start over
+  // ── Journey-level stats ─────────────────────────────────────────────────────
+  // Each element is the net area (m²) gained in one capture journey.
+  // Stored separately so they survive zone merges / fusions.
+
+  /// Appends the area gained by a single journey to the persistent history.
+  Future<void> addJourneyArea(double area) async {
+    final uid = _userId;
+    if (uid == null) return;
+    final current = await loadJourneyAreas();
+    current.add(area);
+    await _db.collection('users').doc(uid).set({
+      'journeyAreas': current,
+    }, SetOptions(merge: true));
+  }
+
+  /// Returns all per-journey area values (oldest first).
+  Future<List<double>> loadJourneyAreas() async {
+    final uid = _userId;
+    if (uid == null) return [];
+    try {
+      final doc = await _db.collection('users').doc(uid).get();
+      if (!doc.exists || doc.data() == null) return [];
+      final raw = doc.data()!['journeyAreas'];
+      if (raw == null) return [];
+      return (raw as List<dynamic>).map((v) => (v as num).toDouble()).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Wipe all data to start over (deletes the whole user document)
   Future<void> wipeData() async {
     final uid = _userId;
     if (uid == null) return;
-    
     await _db.collection('users').doc(uid).delete();
   }
 }

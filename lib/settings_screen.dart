@@ -1,15 +1,19 @@
 import 'dart:ui';
-import 'dart:io';
+import 'dart:io' show File;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'services/settings_service.dart';
 import 'services/auth_service.dart';
+import 'utils/rewards_system.dart';
+import 'utils/level_system.dart';
 import 'main.dart';
 import 'utils/page_transitions.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  final double totalScore;
+  const SettingsScreen({super.key, this.totalScore = 0});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -19,18 +23,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final SettingsService _settings = SettingsService();
   final AuthService _authService = AuthService();
 
-  final List<Color> _availableColors = [
-    const Color(0xFF6C63FF), // Default Primary
-    Colors.cyanAccent,
-    Colors.redAccent,
-    Colors.greenAccent,
-    Colors.amberAccent,
-    Colors.deepOrangeAccent,
-    Colors.purpleAccent,
-    Colors.pinkAccent,
-  ];
-
   Color get _textColor => Theme.of(context).textTheme.bodyLarge?.color ?? Colors.white;
+  int get _playerLevel => LevelSystem.getLevel(widget.totalScore);
 
   @override
   Widget build(BuildContext context) {
@@ -59,32 +53,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
           children: [
             _buildSectionHeader('PROFILE'),
             _buildProfileSection(),
-            const SizedBox(height: 16),
-            _buildAvatarSection(),
             const SizedBox(height: 24),
 
             _buildSectionHeader('APPEARANCE'),
             _buildThemeToggle(),
             const SizedBox(height: 24),
-            
+
             _buildSectionHeader('MAP & NAVIGATION'),
             _buildMapStyleSelector(),
             const SizedBox(height: 16),
             _buildUnitToggle(),
             const SizedBox(height: 24),
 
-            _buildSectionHeader('CUSTOMIZATION'),
-            _buildColorSelector(
-              title: 'CAPTURE ROUTE COLOR',
-              notifier: _settings.captureColor,
-              onColorSelected: _settings.setCaptureColor,
-            ),
-            const SizedBox(height: 16),
-            _buildColorSelector(
-              title: 'RECON ROUTE COLOR',
-              notifier: _settings.reconColor,
-              onColorSelected: _settings.setReconColor,
-            ),
+            _buildSectionHeader('REWARDS — TERRITORY COLOR'),
+            _buildColorRewardGrid(),
+            const SizedBox(height: 24),
+
+            _buildSectionHeader('REWARDS — MAP AVATAR'),
+            _buildAvatarRewardGrid(),
+            const SizedBox(height: 24),
+
+            _buildSectionHeader('RECON ROUTE'),
+            _buildReconColorSelector(),
             const SizedBox(height: 40),
           ],
         ),
@@ -92,6 +82,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ─── Section header ─────────────────────────────────────────────────────────
   Widget _buildSectionHeader(String title) {
     return Padding(
       padding: const EdgeInsets.only(left: 8.0, bottom: 16.0),
@@ -107,6 +98,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ─── Glass card ─────────────────────────────────────────────────────────────
   Widget _buildCard({required Widget child}) {
     return Container(
       decoration: BoxDecoration(
@@ -126,428 +118,242 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
   }
-  Future<void> _changeUsername() async {
-    final controller = TextEditingController();
-    final newUsername = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        title: Text('CHANGE CALLSIGN', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
-        content: TextField(
-          controller: controller,
-          style: TextStyle(color: _textColor),
-          decoration: InputDecoration(
-            hintText: 'New Callsign',
-            hintStyle: TextStyle(color: _textColor.withValues(alpha: 0.5)),
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: _textColor.withValues(alpha: 0.2))),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Theme.of(context).colorScheme.secondary)),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
-            style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.primary),
-            child: const Text('SAVE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
 
-    if (newUsername != null && newUsername.isNotEmpty) {
-      final user = _authService.currentUser;
-      if (user != null) {
-        await _authService.setUsername(user.uid, newUsername);
-        setState(() {}); // trigger rebuild to show new username
-      }
-    }
-  }
+  // ─── Colour reward grid ─────────────────────────────────────────────────────
+  Widget _buildColorRewardGrid() {
+    return _buildCard(
+      child: AnimatedBuilder(
+        animation: _settings.selectedColorIndex,
+        builder: (context, _) {
+          final selectedIdx = _settings.selectedColorIndex.value;
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: List.generate(RewardsSystem.colors.length, (i) {
+                final reward   = RewardsSystem.colors[i];
+                final unlocked = _playerLevel >= reward.requiredLevel;
+                final selected = i == selectedIdx;
 
-  Future<void> _deleteAccount() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        title: const Text('DELETE ACCOUNT', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
-        content: Text(
-          'Are you sure you want to permanently delete your account? This action cannot be undone.',
-          style: TextStyle(color: _textColor),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-            child: const Text('DELETE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      try {
-        await _authService.deleteAccount();
-        if (mounted) {
-          Navigator.of(context).pushAndRemoveUntil(
-            FadePageRoute(page: const AuthWrapper()),
-            (route) => false,
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Failed to delete account. Please logout, login again, and retry.'),
-              backgroundColor: Colors.redAccent,
+                return Padding(
+                  padding: const EdgeInsets.only(right: 14),
+                  child: GestureDetector(
+                    onTap: unlocked ? () => _settings.setSelectedColorIndex(i) : null,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              width: 52,
+                              height: 52,
+                              decoration: BoxDecoration(
+                                color: unlocked
+                                    ? reward.color
+                                    : reward.color.withValues(alpha: 0.2),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: selected ? Colors.white : Colors.transparent,
+                                  width: 3,
+                                ),
+                                boxShadow: selected
+                                    ? [BoxShadow(color: reward.color.withValues(alpha: 0.6), blurRadius: 14, spreadRadius: 2)]
+                                    : [],
+                              ),
+                              child: selected
+                                  ? const Icon(Icons.check, color: Colors.white, size: 22)
+                                  : null,
+                            ),
+                            if (!unlocked)
+                              Container(
+                                width: 52, height: 52,
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.55),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(Icons.lock, color: Colors.white70, size: 20),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          reward.name,
+                          style: TextStyle(
+                            color: unlocked ? _textColor.withValues(alpha: 0.8) : _textColor.withValues(alpha: 0.3),
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (!unlocked)
+                          Text(
+                            'LVL ${reward.requiredLevel}',
+                            style: const TextStyle(color: Colors.amber, fontSize: 9, fontWeight: FontWeight.bold),
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
             ),
           );
-        }
-      }
-    }
+        },
+      ),
+    );
   }
 
-  Future<void> _pickImage() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile != null) {
-      await _settings.setProfileImagePath(pickedFile.path);
-    }
-  }
-
-  Widget _buildProfileSection() {
+  // ─── Avatar reward grid ─────────────────────────────────────────────────────
+  Widget _buildAvatarRewardGrid() {
     return _buildCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              GestureDetector(
-                onTap: _pickImage,
-                child: ValueListenableBuilder<String?>(
-                  valueListenable: _settings.profileImagePath,
-                  builder: (context, localPath, _) {
-                    final googlePhotoUrl = _authService.currentUser?.photoURL;
-                    
-                    Widget imageWidget;
-                    if (localPath != null && localPath.isNotEmpty) {
-                      imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
-                    } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
-                      imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
-                    } else {
-                      imageWidget = Icon(Icons.account_circle, color: Theme.of(context).colorScheme.secondary, size: 40);
-                    }
+      child: AnimatedBuilder(
+        animation: Listenable.merge([_settings.selectedAvatarIndex, _settings.profileImagePath]),
+        builder: (context, _) {
+          final selectedIdx = _settings.selectedAvatarIndex.value;
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: List.generate(RewardsSystem.avatars.length, (i) {
+                final reward   = RewardsSystem.avatars[i];
+                final unlocked = _playerLevel >= reward.requiredLevel;
+                final selected = i == selectedIdx;
 
-                    return Container(
-                      width: 50,
-                      height: 50,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Theme.of(context).colorScheme.secondary, width: 2),
-                      ),
-                      child: Stack(
-                        children: [
-                          Positioned.fill(child: ClipOval(child: imageWidget)),
-                          Positioned(
-                            right: 0,
-                            bottom: 0,
-                            child: Container(
-                              padding: const EdgeInsets.all(2),
-                              decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.surface,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(Icons.edit, size: 12, color: Theme.of(context).colorScheme.secondary),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
+                Widget preview;
+                if (reward.emoji != null) {
+                  preview = Text(reward.emoji!, style: TextStyle(fontSize: 24, color: unlocked ? null : Colors.white30));
+                } else if (reward.id == 'default') {
+                  preview = Container(
+                    width: 24, height: 24,
+                    decoration: BoxDecoration(
+                      color: unlocked ? Theme.of(context).colorScheme.secondary : Colors.white24,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                  );
+                } else if (reward.id == 'profile') {
+                  final localPath   = _settings.profileImagePath.value;
+                  final googlePhoto = _authService.currentUser?.photoURL;
+                  Widget img;
+                  if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
+                    img = Image.file(File(localPath), fit: BoxFit.cover);
+                  } else if (googlePhoto != null && googlePhoto.isNotEmpty) {
+                    img = Image.network(googlePhoto, fit: BoxFit.cover);
+                  } else {
+                    img = const Icon(Icons.person, color: Colors.white, size: 20);
                   }
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    FutureBuilder<String?>(
-                      future: _authService.getUsername(_authService.currentUser?.uid ?? ''),
-                      builder: (context, snapshot) {
-                        return Text(
-                          snapshot.data?.toUpperCase() ?? 'AGENT',
-                          style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 18),
-                        );
-                      },
-                    ),
-                    Text(
-                      _authService.currentUser?.email ?? 'Unknown User',
-                      style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _changeUsername,
-                  style: OutlinedButton.styleFrom(
-                    side: BorderSide(color: Theme.of(context).colorScheme.secondary.withValues(alpha: 0.5)),
-                    foregroundColor: Theme.of(context).colorScheme.secondary,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  child: const Text('CHANGE CALLSIGN', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () async {
-                    await _authService.signOut();
-                    if (mounted) {
-                      Navigator.of(context).pushAndRemoveUntil(
-                        FadePageRoute(page: const AuthWrapper()),
-                        (route) => false,
-                      );
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    foregroundColor: _textColor.withValues(alpha: 0.7),
-                    elevation: 0,
-                    side: BorderSide(color: _textColor.withValues(alpha: 0.2)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  child: const Text('LOGOUT', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2)),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: _deleteAccount,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
-                    foregroundColor: Colors.redAccent,
-                    elevation: 0,
-                    side: BorderSide(color: Colors.redAccent.withValues(alpha: 0.3)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  child: const Text('DELETE', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2)),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
+                  preview = SizedBox(width: 28, height: 28, child: ClipOval(child: img));
+                } else {
+                  preview = Icon(reward.icon ?? Icons.circle, color: unlocked ? Colors.white : Colors.white30, size: 24);
+                }
 
-  Widget _buildAvatarSection() {
-    final List<String> avatars = ['default', 'profile', '🦆', '🚗', '✏️', '🚀', '🌟', '🍕', '👻', '👽', '🤖', '🐶', '🐱', '🦄', '💀', '🔥', '⚔️', '🛡️', '👑', '🍔'];
-
-    return _buildCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'MAP AVATAR',
-            style: TextStyle(color: _textColor.withValues(alpha: 0.5), fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 2),
-          ),
-          const SizedBox(height: 16),
-          AnimatedBuilder(
-            animation: Listenable.merge([_settings.markerType, _settings.profileImagePath]),
-            builder: (context, _) {
-              final currentMarker = _settings.markerType.value;
-              return SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: avatars.map((avatar) {
-                    final isSelected = currentMarker == avatar;
-                    Widget iconWidget;
-                    
-                    if (avatar == 'default') {
-                      iconWidget = Container(
-                        width: 28, height: 28,
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.secondary,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 2),
-                        ),
-                      );
-                    } else if (avatar == 'profile') {
-                      final localPath = _settings.profileImagePath.value;
-                      final googlePhotoUrl = _authService.currentUser?.photoURL;
-                      Widget imageWidget;
-                      if (localPath != null && localPath.isNotEmpty) {
-                        imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
-                      } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
-                        imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
-                      } else {
-                        imageWidget = const Icon(Icons.person, color: Colors.white, size: 18);
-                      }
-                      iconWidget = Container(
-                        width: 28, height: 28,
-                        decoration: const BoxDecoration(shape: BoxShape.circle),
-                        child: ClipOval(child: imageWidget),
-                      );
-                    } else {
-                      iconWidget = Text(avatar, style: const TextStyle(fontSize: 24));
-                    }
-
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 12),
-                      child: GestureDetector(
-                        onTap: () => _settings.setMarkerType(avatar),
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: isSelected ? Theme.of(context).colorScheme.secondary.withValues(alpha: 0.2) : Colors.transparent,
-                            border: Border.all(
-                              color: isSelected ? Theme.of(context).colorScheme.secondary : _textColor.withValues(alpha: 0.1),
-                              width: 2,
+                return Padding(
+                  padding: const EdgeInsets.only(right: 14),
+                  child: GestureDetector(
+                    onTap: unlocked ? () => _settings.setSelectedAvatarIndex(i) : null,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              width: 56, height: 56,
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? Theme.of(context).colorScheme.secondary.withValues(alpha: 0.25)
+                                    : _textColor.withValues(alpha: unlocked ? 0.06 : 0.03),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                  color: selected
+                                      ? Theme.of(context).colorScheme.secondary
+                                      : _textColor.withValues(alpha: 0.1),
+                                  width: 2,
+                                ),
+                                boxShadow: selected
+                                    ? [BoxShadow(color: Theme.of(context).colorScheme.secondary.withValues(alpha: 0.4), blurRadius: 10)]
+                                    : [],
+                              ),
+                              child: Center(child: preview),
                             ),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: iconWidget,
+                            if (!unlocked)
+                              Container(
+                                width: 56, height: 56,
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.55),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: const Icon(Icons.lock, color: Colors.white70, size: 20),
+                              ),
+                          ],
                         ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildThemeToggle() {
-    return _buildCard(
-      child: ValueListenableBuilder<bool>(
-        valueListenable: _settings.isDarkTheme,
-        builder: (context, isDark, _) {
-          return SwitchListTile(
-            title: Text('Cyberpunk Dark Mode', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
-            subtitle: Text('Toggle between dark and light app themes', style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12)),
-            value: isDark,
-            activeColor: Theme.of(context).colorScheme.secondary,
-            contentPadding: EdgeInsets.zero,
-            onChanged: (value) => _settings.setDarkTheme(value),
+                        const SizedBox(height: 6),
+                        Text(
+                          reward.name,
+                          style: TextStyle(
+                            color: unlocked ? _textColor.withValues(alpha: 0.8) : _textColor.withValues(alpha: 0.3),
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (!unlocked)
+                          Text(
+                            'LVL ${reward.requiredLevel}',
+                            style: const TextStyle(color: Colors.amber, fontSize: 9, fontWeight: FontWeight.bold),
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+            ),
           );
         },
       ),
     );
   }
 
-  Widget _buildMapStyleSelector() {
-    return _buildCard(
-      child: ValueListenableBuilder<String>(
-        valueListenable: _settings.mapStyle,
-        builder: (context, currentStyle, _) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Map Style', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
-              _buildRadioOption('Tactical Dark', SettingsService.mapStyleDark, currentStyle, _settings.setMapStyle),
-              _buildRadioOption('Recon Light', SettingsService.mapStyleLight, currentStyle, _settings.setMapStyle),
-              _buildRadioOption('Standard Map', SettingsService.mapStyleStreet, currentStyle, _settings.setMapStyle),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildRadioOption(String title, String value, String groupValue, Function(String) onChanged) {
-    return Theme(
-      data: Theme.of(context).copyWith(
-        unselectedWidgetColor: _textColor.withValues(alpha: 0.54),
-      ),
-      child: RadioListTile<String>(
-        title: Text(title, style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
-        value: value,
-        groupValue: groupValue,
-        activeColor: Theme.of(context).colorScheme.secondary,
-        contentPadding: EdgeInsets.zero,
-        onChanged: (val) {
-          if (val != null) onChanged(val);
-        },
-      ),
-    );
-  }
-
-  Widget _buildUnitToggle() {
-    return _buildCard(
-      child: ValueListenableBuilder<bool>(
-        valueListenable: _settings.useMetric,
-        builder: (context, useMetric, _) {
-          return SwitchListTile(
-            title: Text('Use Metric System', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
-            subtitle: Text('Meters/KM vs Feet/Miles', style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12)),
-            value: useMetric,
-            activeColor: Theme.of(context).colorScheme.secondary,
-            contentPadding: EdgeInsets.zero,
-            onChanged: (value) => _settings.setUseMetric(value),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildColorSelector({
-    required String title,
-    required ValueNotifier<Color> notifier,
-    required Function(Color) onColorSelected,
-  }) {
+  // ─── Recon colour selector (unchanged) ──────────────────────────────────────
+  Widget _buildReconColorSelector() {
+    final List<Color> reconColors = [
+      Colors.cyanAccent,
+      Colors.greenAccent,
+      Colors.amberAccent,
+      Colors.redAccent,
+      Colors.purpleAccent,
+      Colors.pinkAccent,
+      Colors.deepOrangeAccent,
+      Colors.white,
+    ];
     return _buildCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+          Text('RECON ROUTE COLOR', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
           SizedBox(
             height: 50,
-            child: ValueListenableBuilder<Color>(
-              valueListenable: notifier,
-              builder: (context, selectedColor, _) {
+            child: AnimatedBuilder(
+              animation: _settings.reconColor,
+              builder: (context, _) {
+                final selected = _settings.reconColor.value;
                 return ListView.separated(
                   scrollDirection: Axis.horizontal,
-                  itemCount: _availableColors.length,
-                  separatorBuilder: (context, index) => const SizedBox(width: 12),
-                  itemBuilder: (context, index) {
-                    final color = _availableColors[index];
-                    final isSelected = color.value == selectedColor.value;
+                  itemCount: reconColors.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 12),
+                  itemBuilder: (context, i) {
+                    final color    = reconColors[i];
+                    final isSel    = color.value == selected.value;
                     return GestureDetector(
-                      onTap: () => onColorSelected(color),
+                      onTap: () => _settings.setReconColor(color),
                       child: Container(
                         width: 50,
                         decoration: BoxDecoration(
                           color: color,
                           shape: BoxShape.circle,
-                          border: Border.all(
-                            color: isSelected ? _textColor : Colors.transparent,
-                            width: 3,
-                          ),
-                          boxShadow: isSelected
-                              ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 10, spreadRadius: 2)]
-                              : [],
+                          border: Border.all(color: isSel ? Colors.white : Colors.transparent, width: 3),
+                          boxShadow: isSel ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 10, spreadRadius: 2)] : [],
                         ),
-                        child: isSelected ? const Icon(Icons.check, color: Colors.white) : null,
+                        child: isSel ? const Icon(Icons.check, color: Colors.white) : null,
                       ),
                     );
                   },
@@ -558,5 +364,263 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  // ─── Profile section ────────────────────────────────────────────────────────
+  Widget _buildProfileSection() {
+    return _buildCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              GestureDetector(
+                onTap: _pickImage,
+                child: AnimatedBuilder(
+                  animation: _settings.profileImagePath,
+                  builder: (context, _) {
+                    final localPath    = _settings.profileImagePath.value;
+                    final googlePhoto  = _authService.currentUser?.photoURL;
+                    Widget imageWidget;
+                    if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
+                      imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
+                    } else if (googlePhoto != null && googlePhoto.isNotEmpty) {
+                      imageWidget = Image.network(googlePhoto, fit: BoxFit.cover);
+                    } else {
+                      imageWidget = Icon(Icons.account_circle, color: Theme.of(context).colorScheme.secondary, size: 40);
+                    }
+                    return Container(
+                      width: 50, height: 50,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Theme.of(context).colorScheme.secondary, width: 2),
+                      ),
+                      child: Stack(children: [
+                        Positioned.fill(child: ClipOval(child: imageWidget)),
+                        Positioned(
+                          right: 0, bottom: 0,
+                          child: Container(
+                            padding: const EdgeInsets.all(2),
+                            decoration: BoxDecoration(color: Theme.of(context).colorScheme.surface, shape: BoxShape.circle),
+                            child: Icon(Icons.edit, size: 12, color: Theme.of(context).colorScheme.secondary),
+                          ),
+                        ),
+                      ]),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FutureBuilder<String?>(
+                      future: _authService.getUsername(_authService.currentUser?.uid ?? ''),
+                      builder: (context, snapshot) => Text(
+                        snapshot.data?.toUpperCase() ?? 'AGENT',
+                        style: TextStyle(color: _textColor, fontWeight: FontWeight.bold, fontSize: 18),
+                      ),
+                    ),
+                    Text(
+                      _authService.currentUser?.email ?? 'Unknown User',
+                      style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Level $_playerLevel · ${LevelSystem.getRankTitle(_playerLevel)}',
+                      style: TextStyle(color: Theme.of(context).colorScheme.secondary, fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          OutlinedButton(
+            onPressed: _changeUsername,
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: Theme.of(context).colorScheme.secondary.withValues(alpha: 0.5)),
+              foregroundColor: Theme.of(context).colorScheme.secondary,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            child: const Text('CHANGE CALLSIGN', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          ),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(
+              child: ElevatedButton(
+                onPressed: () async {
+                  await _authService.signOut();
+                  if (mounted) {
+                    Navigator.of(context).pushAndRemoveUntil(FadePageRoute(page: const AuthWrapper()), (r) => false);
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  foregroundColor: _textColor.withValues(alpha: 0.7),
+                  elevation: 0,
+                  side: BorderSide(color: _textColor.withValues(alpha: 0.2)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: const Text('LOGOUT', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2)),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _deleteAccount,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
+                  foregroundColor: Colors.redAccent,
+                  elevation: 0,
+                  side: BorderSide(color: Colors.redAccent.withValues(alpha: 0.3)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: const Text('DELETE', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 2)),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  // ─── Theme / Map / Unit helpers ─────────────────────────────────────────────
+  Widget _buildThemeToggle() {
+    return _buildCard(
+      child: AnimatedBuilder(
+        animation: _settings.isDarkTheme,
+        builder: (context, _) => SwitchListTile(
+          title: Text('Cyberpunk Dark Mode', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+          subtitle: Text('Toggle between dark and light app themes', style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12)),
+          value: _settings.isDarkTheme.value,
+          activeColor: Theme.of(context).colorScheme.secondary,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => _settings.setDarkTheme(v),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMapStyleSelector() {
+    return _buildCard(
+      child: AnimatedBuilder(
+        animation: _settings.mapStyle,
+        builder: (context, _) {
+          final cur = _settings.mapStyle.value;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Map Style', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              _radio('Tactical Dark',  SettingsService.mapStyleDark,   cur),
+              _radio('Recon Light',    SettingsService.mapStyleLight,  cur),
+              _radio('Standard Map',   SettingsService.mapStyleStreet, cur),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _radio(String label, String val, String group) {
+    return Theme(
+      data: Theme.of(context).copyWith(unselectedWidgetColor: _textColor.withValues(alpha: 0.54)),
+      child: RadioListTile<String>(
+        title: Text(label, style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
+        value: val,
+        groupValue: group,
+        activeColor: Theme.of(context).colorScheme.secondary,
+        contentPadding: EdgeInsets.zero,
+        onChanged: (v) { if (v != null) _settings.setMapStyle(v); },
+      ),
+    );
+  }
+
+  Widget _buildUnitToggle() {
+    return _buildCard(
+      child: AnimatedBuilder(
+        animation: _settings.useMetric,
+        builder: (context, _) => SwitchListTile(
+          title: Text('Use Metric System', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+          subtitle: Text('Meters/KM vs Feet/Miles', style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12)),
+          value: _settings.useMetric.value,
+          activeColor: Theme.of(context).colorScheme.secondary,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => _settings.setUseMetric(v),
+        ),
+      ),
+    );
+  }
+
+  // ─── Dialogs ────────────────────────────────────────────────────────────────
+  Future<void> _changeUsername() async {
+    final controller = TextEditingController();
+    final newUsername = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).colorScheme.surface,
+        title: Text('CHANGE CALLSIGN', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: controller,
+          style: TextStyle(color: _textColor),
+          decoration: InputDecoration(
+            hintText: 'New Callsign',
+            hintStyle: TextStyle(color: _textColor.withValues(alpha: 0.5)),
+            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: _textColor.withValues(alpha: 0.2))),
+            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Theme.of(ctx).colorScheme.secondary)),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7)))),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.primary),
+            child: const Text('SAVE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    if (newUsername != null && newUsername.isNotEmpty) {
+      final user = _authService.currentUser;
+      if (user != null) {
+        await _authService.setUsername(user.uid, newUsername);
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).colorScheme.surface,
+        title: const Text('DELETE ACCOUNT', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+        content: Text('Are you sure you want to permanently delete your account? This action cannot be undone.', style: TextStyle(color: _textColor)),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7)))),
+          ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), child: const Text('DELETE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      try {
+        await _authService.deleteAccount();
+        if (mounted) {
+          Navigator.of(context).pushAndRemoveUntil(FadePageRoute(page: const AuthWrapper()), (r) => false);
+        }
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to delete account. Please logout, login again, and retry.'), backgroundColor: Colors.redAccent));
+        }
+      }
+    }
+  }
+
+  Future<void> _pickImage() async {
+    final picker     = ImagePicker();
+    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+    if (pickedFile != null) await _settings.setProfileImagePath(pickedFile.path);
   }
 }

@@ -1,15 +1,20 @@
 import 'dart:ui';
-import 'dart:io';
+import 'dart:io' show File;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'models/capture_event.dart';
 import 'services/storage_service.dart';
-import 'utils/level_system.dart';
 import 'services/settings_service.dart';
 import 'services/auth_service.dart';
+import 'utils/level_system.dart';
+import 'utils/rewards_system.dart';
 
 class StatisticsScreen extends StatefulWidget {
-  const StatisticsScreen({super.key});
+  /// When null → shows the signed-in player's own stats.
+  /// When set → header shows this username (multiplayer: will load that user's Firestore data).
+  final String? ownerUsername;
+  const StatisticsScreen({super.key, this.ownerUsername});
 
   @override
   State<StatisticsScreen> createState() => _StatisticsScreenState();
@@ -17,9 +22,11 @@ class StatisticsScreen extends StatefulWidget {
 
 class _StatisticsScreenState extends State<StatisticsScreen> {
   final StorageService _storageService = StorageService();
-  final AuthService _authService = AuthService();
-  List<CaptureEvent> _events = [];
-  bool _isLoading = true;
+  final AuthService    _authService    = AuthService();
+
+  List<CaptureEvent> _events       = [];
+  List<double>       _journeyAreas = []; // per-journey area history
+  bool               _isLoading    = true;
 
   @override
   void initState() {
@@ -28,26 +35,248 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
   }
 
   Future<void> _loadData() async {
-    final events = await _storageService.loadEvents();
+    final events  = await _storageService.loadEvents();
+    final journeys = await _storageService.loadJourneyAreas();
     events.sort((a, b) => b.timestamp.compareTo(a.timestamp));
     setState(() {
-      _events = events;
-      _isLoading = false;
+      _events       = events;
+      _journeyAreas = journeys;
+      _isLoading    = false;
     });
   }
 
+  // ── Formatting ───────────────────────────────────────────────────────────────
   String _formatArea(double sqMeters) {
-    bool useMetric = SettingsService().useMetric.value;
+    final useMetric = SettingsService().useMetric.value;
     if (useMetric) {
       if (sqMeters >= 1000000) return '${(sqMeters / 1000000).toStringAsFixed(2)} km²';
       return '${sqMeters.toStringAsFixed(1)} m²';
     } else {
-      double sqFeet = sqMeters * 10.7639;
+      final sqFeet = sqMeters * 10.7639;
       if (sqFeet >= 27878400) return '${(sqFeet / 27878400).toStringAsFixed(2)} mi²';
       return '${sqFeet.toStringAsFixed(1)} ft²';
     }
   }
 
+  // ── Rank overview bottom sheet ───────────────────────────────────────────────
+  void _showRankSheet(int currentLevel) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        maxChildSize: 0.95,
+        minChildSize: 0.4,
+        builder: (ctx, scroll) {
+          final secColor = Theme.of(context).colorScheme.secondary;
+          return Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).scaffoldBackgroundColor,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: Column(
+              children: [
+                // Drag handle
+                Padding(
+                  padding: const EdgeInsets.only(top: 12, bottom: 8),
+                  child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(Icons.military_tech, color: secColor),
+                      const SizedBox(width: 10),
+                      Text('RANK OVERVIEW', style: TextStyle(color: secColor, fontWeight: FontWeight.bold, letterSpacing: 2, fontSize: 14)),
+                    ],
+                  ),
+                ),
+                const Divider(color: Colors.white10),
+                Expanded(
+                  child: ListView.builder(
+                    controller: scroll,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    itemCount: LevelSystem.maxLevel,
+                    itemBuilder: (_, i) {
+                      final level      = i + 1;
+                      final rankName   = LevelSystem.getRankTitle(level);
+                      final minArea    = LevelSystem.getMinAreaForLevel(level);
+                      final isCurrent  = level == currentLevel;
+                      final isUnlocked = level <= currentLevel;
+
+                      // Rewards at this level
+                      final unlockedColors  = RewardsSystem.colors .where((c) => c.requiredLevel == level).toList();
+                      final unlockedAvatars = RewardsSystem.avatars.where((a) => a.requiredLevel == level).toList();
+
+                      return AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: isCurrent
+                              ? secColor.withValues(alpha: 0.12)
+                              : isUnlocked
+                                  ? Colors.white.withValues(alpha: 0.04)
+                                  : Colors.black.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: isCurrent
+                                ? secColor.withValues(alpha: 0.6)
+                                : isUnlocked
+                                    ? Colors.white.withValues(alpha: 0.1)
+                                    : Colors.white.withValues(alpha: 0.04),
+                            width: isCurrent ? 2 : 1,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                // Level badge
+                                Container(
+                                  width: 36, height: 36,
+                                  decoration: BoxDecoration(
+                                    color: isUnlocked ? secColor.withValues(alpha: 0.2) : Colors.white.withValues(alpha: 0.05),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: isUnlocked ? secColor : Colors.white24,
+                                      width: 1.5,
+                                    ),
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      '$level',
+                                      style: TextStyle(
+                                        color: isUnlocked ? secColor : Colors.white38,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        rankName,
+                                        style: TextStyle(
+                                          color: isUnlocked ? Colors.white : Colors.white38,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 15,
+                                        ),
+                                      ),
+                                      Text(
+                                        minArea == 0 ? 'Starting rank' : '≥ ${_formatArea(minArea)}',
+                                        style: TextStyle(
+                                          color: isUnlocked ? Colors.white54 : Colors.white24,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (isCurrent)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: secColor.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: secColor.withValues(alpha: 0.5)),
+                                    ),
+                                    child: Text('CURRENT', style: TextStyle(color: secColor, fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                                  ),
+                                if (!isUnlocked)
+                                  const Icon(Icons.lock, color: Colors.white24, size: 16),
+                              ],
+                            ),
+
+                            // Rewards row
+                            if (unlockedColors.isNotEmpty || unlockedAvatars.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              const Divider(color: Colors.white10, height: 1),
+                              const SizedBox(height: 10),
+                              Row(
+                                children: [
+                                  const Icon(Icons.card_giftcard, color: Colors.amber, size: 13),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'REWARDS',
+                                    style: TextStyle(color: Colors.amber.withValues(alpha: 0.8), fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 6,
+                                children: [
+                                  ...unlockedColors.map((c) => _rewardChip(
+                                    label: c.name,
+                                    color: c.color,
+                                    isColor: true,
+                                    unlocked: isUnlocked,
+                                  )),
+                                  ...unlockedAvatars.map((a) => _rewardChip(
+                                    label: a.name,
+                                    emoji: a.emoji,
+                                    color: secColor,
+                                    isColor: false,
+                                    unlocked: isUnlocked,
+                                  )),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _rewardChip({
+    required String label,
+    String? emoji,
+    required Color color,
+    required bool isColor,
+    required bool unlocked,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: unlocked ? 0.15 : 0.05),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: unlocked ? 0.4 : 0.1)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isColor)
+            Container(width: 10, height: 10, decoration: BoxDecoration(color: unlocked ? color : Colors.white24, shape: BoxShape.circle))
+          else
+            Text(emoji ?? '⭐', style: TextStyle(fontSize: 12, color: unlocked ? null : Colors.white24)),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(color: unlocked ? Colors.white70 : Colors.white24, fontSize: 11, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Stat card ────────────────────────────────────────────────────────────────
   Widget _buildStatCard(String title, String value, IconData icon, Color color) {
     return Expanded(
       child: Container(
@@ -57,13 +286,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
           color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.5),
           border: Border.all(color: color.withValues(alpha: 0.3)),
           borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: color.withValues(alpha: 0.05),
-              blurRadius: 10,
-              spreadRadius: 1,
-            )
-          ]
+          boxShadow: [BoxShadow(color: color.withValues(alpha: 0.05), blurRadius: 10, spreadRadius: 1)],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -79,6 +302,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     );
   }
 
+  // ── Build ────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -88,20 +312,21 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
       );
     }
 
-    final totalArea = _events.fold(0.0, (sum, e) => sum + e.area);
-    final avgArea = _events.isEmpty ? 0.0 : totalArea / _events.length;
-    final int currentLevel = LevelSystem.getLevel(totalArea);
-    final String rankTitle = LevelSystem.getRankTitle(currentLevel);
+    final totalArea     = _events.fold(0.0, (sum, e) => sum + e.area);
+    final int currentLevel  = LevelSystem.getLevel(totalArea);
+    final String rankTitle  = LevelSystem.getRankTitle(currentLevel);
 
-    // Calculate Aggressiveness (e.g. 5 captures in last 7 days = 100%)
+    // Per-journey stats (uses journey history, not zone sizes)
+    final double maxJourneyArea = _journeyAreas.isEmpty ? 0.0 : _journeyAreas.reduce((a, b) => a > b ? a : b);
+    final double avgJourneyArea = _journeyAreas.isEmpty ? 0.0 : totalArea / _journeyAreas.length;
+
     final now = DateTime.now();
     final recentCaptures = _events.where((e) => now.difference(e.timestamp).inDays <= 7).length;
     final double aggressiveness = _events.isEmpty ? 0 : (recentCaptures / 5.0).clamp(0.0, 1.0) * 100;
+    final int daysActive = _events.isEmpty
+        ? 0
+        : now.difference(_events.map((e) => e.timestamp).reduce((a, b) => a.isBefore(b) ? a : b)).inDays + 1;
 
-    final double maxArea = _events.isEmpty ? 0.0 : _events.map((e) => e.area).reduce((a, b) => a > b ? a : b);
-    final int daysActive = _events.isEmpty ? 0 : now.difference(_events.map((e) => e.timestamp).reduce((a, b) => a.isBefore(b) ? a : b)).inDays + 1;
-
-    // Calculate Regional Breakdown
     final regionAreas = <String, double>{};
     for (var e in _events) {
       final region = e.regionName ?? 'UNKNOWN SECTOR';
@@ -125,11 +350,13 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Profile & Username Header
+            // Profile header
             FutureBuilder<String?>(
               future: _authService.getUsername(_authService.currentUser?.uid ?? ''),
               builder: (context, snapshot) {
-                final username = snapshot.data ?? 'AGENT';
+                // If opened from a zone tap, show that zone owner's name;
+                // otherwise fall back to the signed-in user's display name.
+                final username = widget.ownerUsername ?? snapshot.data ?? 'AGENT';
                 return Row(
                   children: [
                     ValueListenableBuilder<String?>(
@@ -137,7 +364,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                       builder: (context, localPath, _) {
                         final googlePhotoUrl = _authService.currentUser?.photoURL;
                         Widget imageWidget;
-                        if (localPath != null && localPath.isNotEmpty) {
+                        if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
                           imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
                         } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
                           imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
@@ -145,18 +372,15 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                           imageWidget = Icon(Icons.account_circle, color: secColor, size: 60);
                         }
                         return Container(
-                          width: 80,
-                          height: 80,
+                          width: 80, height: 80,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             border: Border.all(color: priColor, width: 2),
-                            boxShadow: [
-                              BoxShadow(color: priColor.withValues(alpha: 0.3), blurRadius: 15, spreadRadius: 2),
-                            ],
+                            boxShadow: [BoxShadow(color: priColor.withValues(alpha: 0.3), blurRadius: 15, spreadRadius: 2)],
                           ),
                           child: ClipOval(child: imageWidget),
                         );
-                      }
+                      },
                     ),
                     const SizedBox(width: 20),
                     Expanded(
@@ -170,67 +394,69 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                     ),
                   ],
                 );
-              }
+              },
             ),
             const SizedBox(height: 24),
 
-            // Rank Banner
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [priColor.withValues(alpha: 0.3), Colors.transparent],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+            // ── Rank banner (tappable) ─────────────────────────────────────
+            GestureDetector(
+              onTap: () => _showRankSheet(currentLevel),
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [priColor.withValues(alpha: 0.3), Colors.transparent],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  border: Border.all(color: priColor.withValues(alpha: 0.5)),
+                  borderRadius: BorderRadius.circular(20),
                 ),
-                border: Border.all(color: priColor.withValues(alpha: 0.5)),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: priColor.withValues(alpha: 0.2),
-                      shape: BoxShape.circle,
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: priColor.withValues(alpha: 0.2), shape: BoxShape.circle),
+                      child: Icon(Icons.shield, color: priColor, size: 32),
                     ),
-                    child: Icon(Icons.shield, color: priColor, size: 32),
-                  ),
-                  const SizedBox(width: 16),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('LEVEL $currentLevel', style: const TextStyle(fontSize: 14, color: Colors.white70, fontWeight: FontWeight.bold, letterSpacing: 2)),
-                      Text(rankTitle, style: TextStyle(fontSize: 24, color: secColor, fontWeight: FontWeight.w900, letterSpacing: 1.5)),
-                    ],
-                  ),
-                ],
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('LEVEL $currentLevel', style: const TextStyle(fontSize: 14, color: Colors.white70, fontWeight: FontWeight.bold, letterSpacing: 2)),
+                          Text(rankTitle, style: TextStyle(fontSize: 24, color: secColor, fontWeight: FontWeight.w900, letterSpacing: 1.5)),
+                        ],
+                      ),
+                    ),
+                    Column(
+                      children: [
+                        Icon(Icons.chevron_right, color: Colors.white38),
+                        Text('ALL RANKS', style: TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 1)),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
-            
-            // Primary Stats Grid
-            Row(
-              children: [
-                _buildStatCard('TOTAL AREA', _formatArea(totalArea), Icons.map_outlined, secColor),
-                _buildStatCard('AVG CAPTURE', _formatArea(avgArea), Icons.pie_chart_outline, Colors.orangeAccent),
-              ],
-            ),
-            Row(
-              children: [
-                _buildStatCard('ZONES OWNED', '${_events.length}', Icons.flag_outlined, Colors.greenAccent),
-                _buildStatCard('TACTICAL AGG.', '${aggressiveness.toInt()}%', Icons.local_fire_department_outlined, Colors.redAccent),
-              ],
-            ),
-            Row(
-              children: [
-                _buildStatCard('MAX CAPTURE', _formatArea(maxArea), Icons.star_border, Colors.purpleAccent),
-                _buildStatCard('DAYS ACTIVE', '$daysActive', Icons.calendar_today, Colors.blueAccent),
-              ],
             ),
             const SizedBox(height: 24),
 
-            // Multiplayer Placeholders
+            // ── Stats grid ─────────────────────────────────────────────────
+            Row(children: [
+              _buildStatCard('TOTAL AREA',   _formatArea(totalArea),      Icons.map_outlined,               secColor),
+              _buildStatCard('AVG CAPTURE',  _formatArea(avgJourneyArea), Icons.pie_chart_outline,           Colors.orangeAccent),
+            ]),
+            Row(children: [
+              _buildStatCard('ZONES OWNED',  '${_events.length}',         Icons.flag_outlined,               Colors.greenAccent),
+              _buildStatCard('TACTICAL AGG.','${aggressiveness.toInt()}%', Icons.local_fire_department_outlined, Colors.redAccent),
+            ]),
+            Row(children: [
+              _buildStatCard('MAX CAPTURE',  _formatArea(maxJourneyArea), Icons.star_border,                 Colors.purpleAccent),
+              _buildStatCard('DAYS ACTIVE',  '$daysActive',               Icons.calendar_today,              Colors.blueAccent),
+            ]),
+            const SizedBox(height: 24),
+
+            // Global Networks placeholder
             Text('GLOBAL NETWORKS', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontWeight: FontWeight.bold, letterSpacing: 2, fontSize: 12)),
             const SizedBox(height: 12),
             Container(
@@ -243,42 +469,35 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  Column(
-                    children: [
-                      const Text('GLOBAL RANK', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1.5)),
-                      const SizedBox(height: 8),
-                      Text('UNRANKED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontWeight: FontWeight.bold, fontSize: 16)),
-                    ],
-                  ),
+                  Column(children: [
+                    const Text('GLOBAL RANK', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1.5)),
+                    const SizedBox(height: 8),
+                    Text('UNRANKED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontWeight: FontWeight.bold, fontSize: 16)),
+                  ]),
                   Container(width: 1, height: 40, color: Colors.white12),
-                  Column(
-                    children: [
-                      const Text('REGIONAL RANK', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1.5)),
-                      const SizedBox(height: 8),
-                      Text('UNRANKED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontWeight: FontWeight.bold, fontSize: 16)),
-                    ],
-                  ),
+                  Column(children: [
+                    const Text('REGIONAL RANK', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1.5)),
+                    const SizedBox(height: 8),
+                    Text('UNRANKED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontWeight: FontWeight.bold, fontSize: 16)),
+                  ]),
                 ],
               ),
             ),
-            
             const SizedBox(height: 32),
+
+            // Territorial presence
             Text('TERRITORIAL PRESENCE', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontWeight: FontWeight.bold, letterSpacing: 2, fontSize: 12)),
             const SizedBox(height: 12),
-            
             if (sortedRegions.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(24.0),
-                child: Center(
-                  child: Text('NO TERRITORIES DETECTED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), letterSpacing: 2)),
-                ),
+                child: Center(child: Text('NO TERRITORIES DETECTED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), letterSpacing: 2))),
               )
             else
               ...sortedRegions.map((entry) {
-                final region = entry.key;
-                final area = entry.value;
+                final region     = entry.key;
+                final area       = entry.value;
                 final percentage = totalArea > 0 ? (area / totalArea) * 100 : 0.0;
-                
                 return Container(
                   margin: const EdgeInsets.only(bottom: 12),
                   padding: const EdgeInsets.all(16),
@@ -294,48 +513,31 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Expanded(
-                            child: Text(
-                              region.toUpperCase(),
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16, letterSpacing: 1),
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                            child: Text(region.toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16, letterSpacing: 1), overflow: TextOverflow.ellipsis),
                           ),
-                          Text(
-                            '${percentage.toStringAsFixed(1)}%',
-                            style: TextStyle(color: secColor, fontWeight: FontWeight.bold, fontSize: 16),
-                          ),
+                          Text('${percentage.toStringAsFixed(1)}%', style: TextStyle(color: secColor, fontWeight: FontWeight.bold, fontSize: 16)),
                         ],
                       ),
                       const SizedBox(height: 12),
                       ClipRRect(
                         borderRadius: BorderRadius.circular(4),
-                        child: LinearProgressIndicator(
-                          value: percentage / 100,
-                          backgroundColor: Colors.white10,
-                          color: secColor,
-                          minHeight: 6,
-                        ),
+                        child: LinearProgressIndicator(value: percentage / 100, backgroundColor: Colors.white10, color: secColor, minHeight: 6),
                       ),
                       const SizedBox(height: 8),
-                      Text(
-                        _formatArea(area),
-                        style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, fontWeight: FontWeight.w600),
-                      ),
+                      Text(_formatArea(area), style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, fontWeight: FontWeight.w600)),
                     ],
                   ),
                 );
               }),
             const SizedBox(height: 32),
-            
+
+            // Recent activity
             Text('RECENT ACTIVITY LOG', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontWeight: FontWeight.bold, letterSpacing: 2, fontSize: 12)),
             const SizedBox(height: 12),
-            
             if (_events.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(24.0),
-                child: Center(
-                  child: Text('NO RECENT ACTIVITY', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), letterSpacing: 2)),
-                ),
+                child: Center(child: Text('NO RECENT ACTIVITY', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), letterSpacing: 2))),
               )
             else
               ...(_events.take(5).map((e) {
@@ -366,7 +568,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                   ),
                 );
               })),
-
             const SizedBox(height: 40),
           ],
         ),

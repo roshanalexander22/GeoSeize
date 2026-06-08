@@ -1,6 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
@@ -71,24 +72,53 @@ class AuthService {
 
   // Check if username exists
   Future<bool> hasUsername(String uid) async {
-    final doc = await _firestore.collection('users').doc(uid).get();
-    return doc.exists && doc.data()!.containsKey('username');
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.containsKey('username_$uid')) return true;
+
+    try {
+      final doc = await _firestore.collection('users').doc(uid).get();
+      if (doc.exists && doc.data()!.containsKey('username')) {
+        await prefs.setString('username_$uid', doc.data()!['username']);
+        return true;
+      }
+    } catch (e) {
+      print('Firestore error: $e');
+    }
+    return false;
   }
 
   // Get username
   Future<String?> getUsername(String uid) async {
-    final doc = await _firestore.collection('users').doc(uid).get();
-    if (doc.exists) {
-      return doc.data()?['username'] as String?;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.containsKey('username_$uid')) {
+      return prefs.getString('username_$uid');
+    }
+
+    try {
+      final doc = await _firestore.collection('users').doc(uid).get();
+      if (doc.exists) {
+        final name = doc.data()?['username'] as String?;
+        if (name != null) await prefs.setString('username_$uid', name);
+        return name;
+      }
+    } catch (e) {
+      print('Firestore error: $e');
     }
     return null;
   }
 
   // Set username
   Future<void> setUsername(String uid, String username) async {
-    await _firestore.collection('users').doc(uid).set({
-      'username': username,
-      'createdAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('username_$uid', username);
+
+    try {
+      await _firestore.collection('users').doc(uid).set({
+        'username': username,
+        'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      print('Firestore error: $e');
+    }
   }
 }
