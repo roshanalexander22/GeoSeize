@@ -17,11 +17,14 @@ class SettingsService {
   static const String _keyMarkerType         = 'markerType';
   static const String _keySelectedColorIndex = 'selectedColorIndex';
   static const String _keySelectedAvatarIndex = 'selectedAvatarIndex';
+  static const String _keyShowMapScale       = 'showMapScale';
 
   // Map Style Options
-  static const String mapStyleDark   = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png';
-  static const String mapStyleLight  = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png';
-  static const String mapStyleStreet = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  static const String mapStyleDark      = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png';
+  static const String mapStyleLight     = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png';
+  static const String mapStyleStreet    = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  static const String mapStyleSatellite = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
 
   // ValueNotifiers for reactive UI updates
   final ValueNotifier<bool>   isDarkTheme      = ValueNotifier<bool>(true);
@@ -37,6 +40,9 @@ class SettingsService {
   /// Index into RewardsSystem.avatars — the player's chosen avatar.
   final ValueNotifier<int> selectedAvatarIndex = ValueNotifier<int>(0);
 
+  /// Whether to show the map scale indicator in the corner.
+  final ValueNotifier<bool> showMapScale = ValueNotifier<bool>(true);
+
   /// The actual Color derived from the selected index.
   Color get selectedColor => RewardsSystem.colors[selectedColorIndex.value].color;
 
@@ -47,6 +53,7 @@ class SettingsService {
     mapStyle.value       = prefs.getString(_keyMapStyle)    ?? mapStyleDark;
     useMetric.value      = prefs.getBool(_keyUseMetric)    ?? true;
     profileImagePath.value = prefs.getString(_keyProfileImagePath);
+    showMapScale.value   = prefs.getBool(_keyShowMapScale) ?? true;
 
     // Restore colour index (default 0 = Cyan)
     selectedColorIndex.value  = prefs.getInt(_keySelectedColorIndex)  ?? 0;
@@ -123,5 +130,11 @@ class SettingsService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_keySelectedAvatarIndex, index);
     await prefs.setString(_keyMarkerType, markerType.value);
+  }
+
+  Future<void> setShowMapScale(bool value) async {
+    showMapScale.value = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyShowMapScale, value);
   }
 }

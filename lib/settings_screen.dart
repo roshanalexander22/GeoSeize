@@ -6,10 +6,12 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'services/settings_service.dart';
 import 'services/auth_service.dart';
+import 'services/storage_service.dart';
 import 'utils/rewards_system.dart';
 import 'utils/level_system.dart';
 import 'main.dart';
 import 'utils/page_transitions.dart';
+
 
 class SettingsScreen extends StatefulWidget {
   final double totalScore;
@@ -63,6 +65,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _buildMapStyleSelector(),
             const SizedBox(height: 16),
             _buildUnitToggle(),
+            const SizedBox(height: 16),
+            _buildMapScaleToggle(),
             const SizedBox(height: 24),
 
             _buildSectionHeader('REWARDS — TERRITORY COLOR'),
@@ -75,6 +79,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
             _buildSectionHeader('RECON ROUTE'),
             _buildReconColorSelector(),
+            const SizedBox(height: 24),
+
+            _buildSectionHeader('CONQUEST RESET'),
+            _buildDangerZone(),
             const SizedBox(height: 40),
           ],
         ),
@@ -514,9 +522,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               Text('Map Style', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
-              _radio('Tactical Dark',  SettingsService.mapStyleDark,   cur),
-              _radio('Recon Light',    SettingsService.mapStyleLight,  cur),
-              _radio('Standard Map',   SettingsService.mapStyleStreet, cur),
+              _radio('Tactical Dark',  SettingsService.mapStyleDark,      cur),
+              _radio('Recon Light',    SettingsService.mapStyleLight,     cur),
+              _radio('Standard Map',   SettingsService.mapStyleStreet,    cur),
+              _radio('Satellite View', SettingsService.mapStyleSatellite, cur),
             ],
           );
         },
@@ -538,6 +547,114 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ─── Danger zone / Reset ────────────────────────────────────────────────────
+  Widget _buildDangerZone() {
+    final storage = StorageService();
+
+    Future<void> doReset(String label, Future<void> Function() action) async {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Theme.of(ctx).colorScheme.surface,
+          title: Text(label.toUpperCase(),
+              style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 14)),
+          content: Text(
+            'This will permanently delete all conquest data for the selected period. This cannot be undone.',
+            style: TextStyle(color: _textColor.withValues(alpha: 0.8), fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('CANCEL', style: TextStyle(color: _textColor.withValues(alpha: 0.7))),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+              child: const Text('RESET', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true || !mounted) return;
+      await action();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$label complete.'),
+            backgroundColor: Colors.redAccent.withValues(alpha: 0.9),
+          ),
+        );
+      }
+    }
+
+    final now = DateTime.now();
+    final startOfToday    = DateTime(now.year, now.month, now.day);
+    final startOfWeek     = startOfToday.subtract(Duration(days: now.weekday - 1));
+    final startOfMonth    = DateTime(now.year, now.month, 1);
+
+    final resets = [
+      (
+        icon: Icons.today,
+        label: "Reset Today's Conquest",
+        action: () => storage.resetEventsByDateRange(startOfToday, now),
+      ),
+      (
+        icon: Icons.date_range,
+        label: "Reset This Week's Conquest",
+        action: () => storage.resetEventsByDateRange(startOfWeek, now),
+      ),
+      (
+        icon: Icons.calendar_month,
+        label: "Reset This Month's Conquest",
+        action: () => storage.resetEventsByDateRange(startOfMonth, now),
+      ),
+      (
+        icon: Icons.delete_forever,
+        label: "Reset All-Time Conquest",
+        action: () => storage.wipeData(),
+      ),
+    ];
+
+    return _buildCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.warning_amber, color: Colors.redAccent, size: 18),
+              const SizedBox(width: 8),
+              Text('DANGER ZONE', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, letterSpacing: 1)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Permanently removes captured territories. Cannot be undone.',
+            style: TextStyle(color: _textColor.withValues(alpha: 0.5), fontSize: 11),
+          ),
+          const SizedBox(height: 16),
+          ...resets.map((r) => Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: Icon(r.icon, size: 16, color: Colors.redAccent),
+                label: Text(r.label,
+                    style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 12)),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.redAccent, width: 1),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                  backgroundColor: Colors.redAccent.withValues(alpha: 0.04),
+                ),
+                onPressed: () => doReset(r.label, r.action),
+              ),
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+
   Widget _buildUnitToggle() {
     return _buildCard(
       child: AnimatedBuilder(
@@ -549,6 +666,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
           activeColor: Theme.of(context).colorScheme.secondary,
           contentPadding: EdgeInsets.zero,
           onChanged: (v) => _settings.setUseMetric(v),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMapScaleToggle() {
+    return _buildCard(
+      child: AnimatedBuilder(
+        animation: _settings.showMapScale,
+        builder: (context, _) => SwitchListTile(
+          title: Text('Show Map Scale', style: TextStyle(color: _textColor, fontWeight: FontWeight.bold)),
+          subtitle: Text('Display "1 cm = X m" scale indicator on map', style: TextStyle(color: _textColor.withValues(alpha: 0.54), fontSize: 12)),
+          value: _settings.showMapScale.value,
+          activeColor: Theme.of(context).colorScheme.secondary,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => _settings.setShowMapScale(v),
         ),
       ),
     );

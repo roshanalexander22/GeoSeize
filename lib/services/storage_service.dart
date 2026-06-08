@@ -80,4 +80,20 @@ class StorageService {
     if (uid == null) return;
     await _db.collection('users').doc(uid).delete();
   }
+
+  /// Remove events whose timestamps fall within [from, to] and save the rest.
+  /// Journey history is always cleared because it has no timestamps for filtering.
+  Future<void> resetEventsByDateRange(DateTime from, DateTime to) async {
+    final uid = _userId;
+    if (uid == null) return;
+    final events = await loadEvents();
+    final remaining = events
+        .where((e) => e.timestamp.isBefore(from) || e.timestamp.isAfter(to))
+        .toList();
+    final serialised = remaining.map((e) => e.toJson()).toList();
+    await _db.collection('users').doc(uid).set({
+      'events': serialised,
+      'journeyAreas': <double>[],
+    }, SetOptions(merge: true));
+  }
 }

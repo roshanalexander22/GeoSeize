@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' show cos, log, pi, pow;
 import 'dart:ui';
 import 'dart:io' show File, Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -13,11 +14,13 @@ import 'services/storage_service.dart';
 import 'utils/geo_calculator.dart';
 import 'utils/capture_engine.dart';
 import 'utils/level_system.dart';
+import 'utils/rewards_system.dart';
 import 'statistics_screen.dart';
 import 'utils/page_transitions.dart';
 import 'services/settings_service.dart';
 import 'settings_screen.dart';
 import 'services/auth_service.dart';
+
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -56,12 +59,23 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Animation<double>? _animatedLng;
   LatLng? _displayLocation; // interpolated position used for rendering
   bool _followingUser = true; // whether the camera auto-follows the marker
+  bool _sidebarExpanded = false; // whether the collapsible action buttons are shown
+
+  // ── Journey capture tracking ──────────────────────────────────────────────
+  DateTime? _captureStartTime;  // when the current capture session began
+  double _captureDistance = 0.0; // metres walked this capture segment
+
+  // ── Map camera tracking (for scale widget) ────────────────────────────────
+  double _mapZoom = 16.5;
+  double _mapLat  = 0.0;
   
   @override
   void initState() {
     super.initState();
     _loadData();
     _checkPermissionsAndGetLocation();
+    // Snap zoom when user switches to satellite while over-zoomed
+    SettingsService().mapStyle.addListener(_onMapStyleChanged);
 
     _pulseController = AnimationController(
       vsync: this,
@@ -150,10 +164,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   void _startCapturing() {
     setState(() {
-      _isCapturing = true;
+      _isCapturing       = true;
       _currentPath.clear();
       _captureInProgress = false;
       _hasBeenOutside    = false;
+      _captureStartTime  = DateTime.now();
+      _captureDistance   = 0.0;
       if (_currentLocation != null) {
         _currentPath.add(_currentLocation!);
       }
@@ -252,8 +268,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     });
   }
 
-
-
   void _stopCapturing() {
     setState(() {
       _isCapturing       = false;
@@ -281,6 +295,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     // Minimum movement gate (3 m) to suppress standing-still noise
     final dist = const Distance().as(LengthUnit.Meter, _currentPath.last, smoothed);
     if (dist < 3.0) return;
+
+    // Accumulate journey distance for the capture summary dialog
+    _captureDistance += dist;
 
     final prev  = _currentPath.last;
     final zones = _events.map((e) => e.polygon).toList();
@@ -428,6 +445,13 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     final int oldLevel = LevelSystem.getLevel(_totalScore);
     final int newLevel = LevelSystem.getLevel(newTotalArea);
 
+    // Snapshot journey tracking BEFORE we reset state
+    final double journeyDist  = _captureDistance;
+    final DateTime journeyStart = _captureStartTime ?? DateTime.now();
+
+    // Compute journey gain while _totalScore is still the OLD value
+    final double journeyGain = newTotalArea - _totalScore;
+
     if (!mounted) { _captureInProgress = false; return; }
 
     setState(() {
@@ -439,20 +463,26 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       } else if (polygon.isNotEmpty) {
         _currentPath.add(polygon.last);
       }
-      _hasBeenOutside = false;
+      _hasBeenOutside    = false;
+      // Reset per-segment journey tracking for the next territory
+      _captureDistance   = 0.0;
+      _captureStartTime  = DateTime.now();
     });
 
     await _storageService.saveEvents(_events);
-    // Record this journey's net area gain for per-journey statistics
-    final journeyGain = newTotalArea - _totalScore;
     if (journeyGain > 1.0) {
       await _storageService.addJourneyArea(journeyGain);
     }
     _captureInProgress = false;
 
-
     if (newEvents.isNotEmpty && mounted) {
-      _showSuccessMessage(newEvents.first, leveledUp: newLevel > oldLevel);
+      await _showCaptureResult(
+        event: newEvents.first,
+        leveledUp: newLevel > oldLevel,
+        newLevel: newLevel,
+        journeyDistance: journeyDist,
+        journeyStartTime: journeyStart,
+      );
     }
   }
 
@@ -522,6 +552,34 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
   }
 
+  // ── Sidebar button helper ─────────────────────────────────────────────────
+  Widget _buildSidebarBtn({
+    required IconData icon,
+    Color? color,
+    Color iconColor = Colors.white70,
+    BoxBorder? border,
+    required VoidCallback onPressed,
+    String? tooltip,
+  }) {
+    return ClipOval(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+        child: Container(
+          decoration: BoxDecoration(
+            color: color ?? Colors.black.withValues(alpha: 0.3),
+            shape: BoxShape.circle,
+            border: border ?? Border.all(color: Colors.white.withValues(alpha: 0.1)),
+          ),
+          child: IconButton(
+            icon: Icon(icon, color: iconColor),
+            onPressed: onPressed,
+            tooltip: tooltip,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildPlanStatItem(IconData icon, String label, String value, Color color) {
     return Column(
       children: [
@@ -533,47 +591,320 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
-  void _showSuccessMessage(CaptureEvent event, {required bool leveledUp}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.rocket_launch, color: event.tierColor),
-                const SizedBox(width: 12),
-                Text(
-                  '${event.tierName} ZONE CAPTURED!',
-                  style: TextStyle(color: event.tierColor, fontWeight: FontWeight.bold, fontSize: 16),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text('+${event.area.toStringAsFixed(1)} m²', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-            if (leveledUp)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  'LEVEL UP! You are now a ${LevelSystem.getRankTitle(LevelSystem.getLevel(_totalScore))}',
-                  style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold, fontStyle: FontStyle.italic),
+  // ── Capture result dialog ─────────────────────────────────────────────────
+  Future<void> _showCaptureResult({
+    required CaptureEvent event,
+    required bool leveledUp,
+    required int newLevel,
+    required double journeyDistance,
+    required DateTime journeyStartTime,
+  }) async {
+    if (!mounted) return;
+    final settings    = SettingsService();
+    final bool metric = settings.useMetric.value;
+    final duration    = DateTime.now().difference(journeyStartTime);
+    final durationStr = _formatDuration(duration);
+    final double distKm   = journeyDistance / 1000;
+    final double speedKmh = duration.inSeconds > 0 ? distKm / (duration.inSeconds / 3600) : 0.0;
+    final int calories    = (distKm * 60).round();
+
+    final String distStr = metric
+        ? (journeyDistance >= 1000 ? '${(journeyDistance/1000).toStringAsFixed(2)} km' : '${journeyDistance.toStringAsFixed(0)} m')
+        : () { final ft = journeyDistance * 3.28084; return ft >= 5280 ? '${(ft/5280).toStringAsFixed(2)} mi' : '${ft.toStringAsFixed(0)} ft'; }();
+
+    final String speedStr = metric ? '${speedKmh.toStringAsFixed(1)} km/h' : '${(speedKmh*0.621371).toStringAsFixed(1)} mph';
+
+    final int currentLvl    = LevelSystem.getLevel(_totalScore);
+    final double nextLvlReq = LevelSystem.getNextLevelXpStart(currentLvl);
+    final double needed     = (nextLvlReq - _totalScore).clamp(0.0, nextLvlReq);
+    final bool maxLvl       = currentLvl >= LevelSystem.maxLevel;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 60),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(28),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF12121C).withValues(alpha: 0.95),
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: event.tierColor.withValues(alpha: 0.6), width: 1.5),
+                boxShadow: [BoxShadow(color: event.tierColor.withValues(alpha: 0.25), blurRadius: 30, spreadRadius: 2)],
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: event.tierColor.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(50),
+                        border: Border.all(color: event.tierColor.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.emoji_events, color: event.tierColor, size: 20),
+                        const SizedBox(width: 8),
+                        Text('TERRITORY CAPTURED',
+                            style: TextStyle(color: event.tierColor, fontWeight: FontWeight.w900, letterSpacing: 2, fontSize: 12)),
+                      ]),
+                    ),
+                    const SizedBox(height: 20),
+                    _captureStatRow('📐', 'Area', _formatArea(event.area)),
+                    _captureStatRow('🚶', 'Distance Walked', distStr),
+                    _captureStatRow('⏱', 'Duration', durationStr),
+                    _captureStatRow('⚡', 'Average Speed', speedStr),
+                    _captureStatRow('🔥', 'Calories Burned', '${calories > 0 ? calories : "<1"} kcal'),
+                    const Divider(color: Colors.white12, height: 28),
+                    _captureStatRow('🏅', 'Current Rank', LevelSystem.getRankTitle(currentLvl)),
+                    if (!maxLvl) ...[
+                      _captureStatRow('📊', 'Progress to Next Rank',
+                          '${_totalScore.toStringAsFixed(0)} / ${nextLvlReq.toStringAsFixed(0)} m²'),
+                      _captureStatRow('🎯', 'Need', '${needed.toStringAsFixed(0)} m² more'),
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: LevelSystem.getProgressToNextLevel(_totalScore),
+                          backgroundColor: Colors.white12,
+                          valueColor: AlwaysStoppedAnimation<Color>(event.tierColor),
+                          minHeight: 6,
+                        ),
+                      ),
+                    ] else
+                      _captureStatRow('🏆', 'Status', 'GEO MASTER — MAX LEVEL!'),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: event.tierColor,
+                          foregroundColor: Colors.black,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        child: const Text('CONTINUE',
+                            style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 2)),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-          ],
+            ),
+          ),
         ),
-        backgroundColor: const Color(0xFF1E1E28).withValues(alpha: 0.95),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: event.tierColor, width: 2),
+      ),
+    );
+    if (leveledUp && mounted) await _showLevelUpDialog(newLevel);
+  }
+
+  Widget _captureStatRow(String emoji, String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 5),
+    child: Row(children: [
+      Text(emoji, style: const TextStyle(fontSize: 16)),
+      const SizedBox(width: 10),
+      Expanded(child: Text(label, style: const TextStyle(color: Colors.white54, fontSize: 13))),
+      Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+    ]),
+  );
+
+  // ── Level-up celebration ──────────────────────────────────────────────────
+  Future<void> _showLevelUpDialog(int newLevel) async {
+    if (!mounted) return;
+    final newColors  = RewardsSystem.colors.where((r) => r.requiredLevel == newLevel).toList();
+    final newAvatars = RewardsSystem.avatars.where((r) => r.requiredLevel == newLevel).toList();
+    final rankTitle  = LevelSystem.getRankTitle(newLevel);
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 80),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(28),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                    begin: Alignment.topLeft, end: Alignment.bottomRight,
+                    colors: [Color(0xFF1A1A2E), Color(0xFF16213E)]),
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.7), width: 1.5),
+                boxShadow: [BoxShadow(
+                    color: Colors.amberAccent.withValues(alpha: 0.3), blurRadius: 40, spreadRadius: 4)],
+              ),
+              padding: const EdgeInsets.all(28),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('🎉', style: TextStyle(fontSize: 48)),
+                const SizedBox(height: 8),
+                const Text('LEVEL UP!',
+                    style: TextStyle(color: Colors.amberAccent, fontSize: 28,
+                        fontWeight: FontWeight.w900, letterSpacing: 4)),
+                const SizedBox(height: 4),
+                Text('You are now a',
+                    style: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontSize: 13)),
+                const SizedBox(height: 6),
+                Text(rankTitle,
+                    style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
+                Text('Level $newLevel',
+                    style: TextStyle(
+                        color: Colors.amberAccent.withValues(alpha: 0.8),
+                        fontSize: 13, fontWeight: FontWeight.bold)),
+                if (newColors.isNotEmpty || newAvatars.isNotEmpty) ...[
+                  const SizedBox(height: 20),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.2)),
+                    ),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('🔓 REWARDS UNLOCKED',
+                          style: TextStyle(color: Colors.amberAccent, fontSize: 10,
+                              fontWeight: FontWeight.bold, letterSpacing: 2)),
+                      const SizedBox(height: 12),
+                      Wrap(spacing: 8, runSpacing: 8, children: [
+                        ...newColors.map((r) => Column(mainAxisSize: MainAxisSize.min, children: [
+                          Container(
+                            width: 32, height: 32,
+                            decoration: BoxDecoration(
+                              color: r.color, shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white30, width: 1.5)),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(r.name, style: const TextStyle(color: Colors.white70, fontSize: 9)),
+                        ])),
+                        ...newAvatars.map((r) => Column(mainAxisSize: MainAxisSize.min, children: [
+                          Container(
+                            width: 32, height: 32,
+                            decoration: BoxDecoration(
+                              color: Colors.white10, shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white30, width: 1.5)),
+                            child: Center(
+                              child: r.emoji != null
+                                  ? Text(r.emoji!, style: const TextStyle(fontSize: 16))
+                                  : Icon(r.icon, size: 16, color: Colors.white70),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(r.name, style: const TextStyle(color: Colors.white70, fontSize: 9)),
+                        ])),
+                      ]),
+                    ]),
+                  ),
+                ],
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.amberAccent, foregroundColor: Colors.black,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    child: const Text('AWESOME!',
+                        style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 2)),
+                  ),
+                ),
+              ]),
+            ),
+          ),
         ),
-        margin: const EdgeInsets.only(bottom: 100, left: 16, right: 16),
-        elevation: 10,
-        duration: const Duration(seconds: 4),
       ),
     );
   }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  String _formatDuration(Duration d) {
+    final m = d.inMinutes; final s = d.inSeconds % 60;
+    return m == 0 ? '${s}s' : '${m}m ${s}s';
+  }
+
+  String _getMapScale(double zoom, double latDeg, bool metric) {
+    const double earthCirc = 40075016.686;
+    final metersPerPx = earthCirc * cos(latDeg * pi / 180) / (256.0 * pow(2, zoom));
+    final double mPerCm = metersPerPx * 63.0;
+    if (metric) {
+      return mPerCm >= 1000
+          ? '1 cm = ${(mPerCm/1000).toStringAsFixed(1)} km'
+          : '1 cm = ${mPerCm.toStringAsFixed(0)} m';
+    }
+    final fPerCm = mPerCm * 3.28084;
+    return fPerCm >= 5280
+        ? '1 cm = ${(fPerCm/5280).toStringAsFixed(1)} mi'
+        : '1 cm = ${fPerCm.toStringAsFixed(0)} ft';
+  }
+
+  // ── Google Maps-style scale bar ──────────────────────────────────────────
+  ({double widthPx, String label}) _computeScaleBar(double zoom, double latDeg, bool metric) {
+    final metersPerPx = 40075016.686 * cos(latDeg * pi / 180) / (256.0 * pow(2, zoom));
+    const double targetWidthPx = 90.0;
+    final double targetMeters  = metersPerPx * targetWidthPx;
+
+    final niceM = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+    double chosen = niceM[0].toDouble();
+    for (final d in niceM) {
+      if (d.toDouble() <= targetMeters) chosen = d.toDouble();
+      else break;
+    }
+
+    final barWidthPx = chosen / metersPerPx;
+
+    String label;
+    if (metric) {
+      label = chosen >= 1000
+          ? '${(chosen / 1000).toStringAsFixed(chosen >= 10000 ? 0 : 1)} km'
+          : '${chosen.toStringAsFixed(0)} m';
+    } else {
+      final feet = chosen * 3.28084;
+      label = feet >= 5280
+          ? '${(feet / 5280).toStringAsFixed(1)} mi'
+          : '${feet.toStringAsFixed(0)} ft';
+    }
+    return (widthPx: barWidthPx, label: label);
+  }
+
+  Widget _buildMapScaleWidget(bool metric) {
+    final bar = _computeScaleBar(_mapZoom, _mapLat, metric);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Distance label
+        Text(
+          bar.label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            shadows: [Shadow(blurRadius: 3, color: Colors.black87)],
+          ),
+        ),
+        const SizedBox(height: 3),
+        // I-beam bar
+        SizedBox(
+          width: bar.widthPx,
+          height: 9,
+          child: CustomPaint(
+            painter: _ScaleBarPainter(),
+          ),
+        ),
+      ],
+    );
+  }
+
 
   void _resetData() async {
     showDialog(
@@ -626,11 +957,38 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    SettingsService().mapStyle.removeListener(_onMapStyleChanged);
     _positionStream?.cancel();
     _pulseController.dispose();
     _markerAnimController?.dispose();
     super.dispose();
   }
+
+  /// Computes the maximum zoom level for Satellite view such that the map
+  /// scale never drops below 27 m/cm — the point where ESRI tiles run out.
+  /// The result varies with latitude (cos projection).
+  double _satelliteMaxZoom() {
+    const double minMetersPerCm = 27.0; // scale threshold requested by user
+    const double earthCirc      = 40075016.686;
+    const double dpPerCm        = 63.0;  // Flutter logical pixels per cm
+    final cosLat = cos(_mapLat * pi / 180).clamp(0.001, 1.0);
+    final val    = earthCirc * cosLat * dpPerCm / (256.0 * minMetersPerCm);
+    return log(val) / log(2);
+  }
+
+  /// Called whenever the map style changes.
+  /// If the user switches TO satellite while zoomed in past the tile limit,
+  /// snap the camera back to the computed satellite max zoom.
+  void _onMapStyleChanged() {
+    if (!mounted) return;
+    if (SettingsService().mapStyle.value == SettingsService.mapStyleSatellite) {
+      final maxZ = _satelliteMaxZoom();
+      if (_mapController.camera.zoom > maxZ) {
+        _mapController.move(_mapController.camera.center, maxZ);
+      }
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -645,6 +1003,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         settings.markerType,
         settings.profileImagePath,
         settings.selectedColorIndex,
+        settings.showMapScale,
       ]),
       builder: (context, _) {
         final mapStyle = settings.mapStyle.value;
@@ -678,18 +1037,28 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               options: MapOptions(
                 initialCenter: _currentLocation!,
                 initialZoom: 16.5,
+                minZoom: 3.0,
+                maxZoom: mapStyle == SettingsService.mapStyleSatellite ? _satelliteMaxZoom() : null,
+
                 onTap: _handleMapTap,
                 onPositionChanged: (camera, hasGesture) {
-                  // User manually panned — stop auto-following until recalibrated
-                  if (hasGesture && _followingUser) {
-                    setState(() { _followingUser = false; });
+                  final newZoom = camera.zoom;
+                  final newLat  = camera.center.latitude;
+                  final panGesture = hasGesture && _followingUser;
+                  if (panGesture || newZoom != _mapZoom || (newLat - _mapLat).abs() > 0.0001) {
+                    setState(() {
+                      _mapZoom = newZoom;
+                      _mapLat  = newLat;
+                      if (panGesture) _followingUser = false;
+                    });
                   }
                 },
               ),
               children: [
                 TileLayer(
                   urlTemplate: mapStyle,
-                  subdomains: const ['a', 'b', 'c', 'd'],
+                  // Only use subdomains for tile URLs that contain the {s} placeholder
+                  subdomains: mapStyle.contains('{s}') ? const <String>['a', 'b', 'c', 'd'] : const <String>[],
                   userAgentPackageName: 'com.example.geoseize',
                 ),
                 PolygonLayer(
@@ -926,7 +1295,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                             children: [
                               Text('LVL $currentLevel', style: TextStyle(color: Theme.of(context).colorScheme.secondary, fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
                               const SizedBox(width: 8),
-                              Text('CONQUERED', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+                              Text(
+                                LevelSystem.getRankTitle(currentLevel).toUpperCase(),
+                                style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ],
                           ),
                           const SizedBox(height: 4),
@@ -948,136 +1321,127 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             ),
           ),
 
-          // Action Buttons (Right side)
+          // ── Action Buttons (Right side) ─────────────────────────────────────
           Positioned(
             top: MediaQuery.of(context).padding.top + 130,
             right: 16,
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // Scoreboard Button
-                ClipOval(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
-                      ),
-                      child: IconButton(
-                        icon: const Icon(Icons.analytics, color: Colors.white),
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            SlideUpPageRoute(page: const StatisticsScreen()),
-                          ).then((_) {
-                            // Reload data when returning from statistics
-                            _loadData();
-                          });
-                        },
-                        tooltip: 'Statistics',
+                // ── Always-visible: Stats ─────────────────────────────────────
+                _buildSidebarBtn(
+                  icon: Icons.analytics,
+                  color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4),
+                  iconColor: Colors.white,
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      SlideUpPageRoute(page: const StatisticsScreen()),
+                    ).then((_) => _loadData());
+                  },
+                  tooltip: 'Statistics',
+                ),
+                const SizedBox(height: 12),
+
+                // ── Always-visible: Expand / Collapse arrow ───────────────────
+                GestureDetector(
+                  onTap: () => setState(() => _sidebarExpanded = !_sidebarExpanded),
+                  child: ClipOval(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.35),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: AnimatedRotation(
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeInOut,
+                            turns: _sidebarExpanded ? 0.5 : 0.0, // flips arrow up/down
+                            child: const Icon(Icons.keyboard_arrow_down, color: Colors.white70, size: 24),
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                // Reset Button
-                ClipOval(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.3),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: IconButton(
-                        icon: const Icon(Icons.refresh, color: Colors.white70),
-                        onPressed: _resetData,
-                        tooltip: 'Reset Simulation',
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // Calibrate GPS Button
-                ClipOval(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.3),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: IconButton(
-                        icon: const Icon(Icons.my_location, color: Colors.white70),
-                        onPressed: () async {
-                          final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.best);
-                          final pt = LatLng(pos.latitude, pos.longitude);
-                          setState(() {
-                            _currentLocation  = pt;
-                            _displayLocation  = pt;
-                            _followingUser    = true; // re-enable camera follow
-                          });
-                          _mapController.move(pt, _mapController.camera.zoom);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Location Refreshed — following you again!')),
-                            );
-                          }
-                        },
-                        tooltip: 'Calibrate GPS',
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // Settings Button
-                ClipOval(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.3),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: IconButton(
-                        icon: const Icon(Icons.settings, color: Colors.white70),
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            SlideUpPageRoute(page: SettingsScreen(totalScore: _totalScore)),
-                          );
-                        },
-                        tooltip: 'Settings',
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // Recon Mode Toggle Button
-                ClipOval(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: _isPlanningMode ? recColor.withValues(alpha: 0.2) : Colors.black.withValues(alpha: 0.3),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: _isPlanningMode ? recColor : Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: IconButton(
-                        icon: Icon(Icons.explore, color: _isPlanningMode ? recColor : Colors.white70),
-                        onPressed: _togglePlanningMode,
-                        tooltip: 'Recon Mode',
-                      ),
-                    ),
-                  ),
+
+                // ── Expandable section ────────────────────────────────────────
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeInOut,
+                  alignment: Alignment.topCenter,
+                  child: _sidebarExpanded
+                      ? Column(
+                          children: [
+                            const SizedBox(height: 12),
+                            // Calibrate / Re-centre GPS
+                            _buildSidebarBtn(
+                              icon: Icons.my_location,
+                              onPressed: () async {
+                                final pos = await Geolocator.getCurrentPosition(
+                                    desiredAccuracy: LocationAccuracy.best);
+                                final pt = LatLng(pos.latitude, pos.longitude);
+                                setState(() {
+                                  _currentLocation = pt;
+                                  _displayLocation = pt;
+                                  _followingUser   = true;
+                                });
+                                _mapController.move(pt, _mapController.camera.zoom);
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Location refreshed — following you again!')),
+                                  );
+                                }
+                              },
+                              tooltip: 'Calibrate GPS',
+                            ),
+                            const SizedBox(height: 12),
+                            // Settings
+                            _buildSidebarBtn(
+                              icon: Icons.settings,
+                              onPressed: () => Navigator.push(
+                                context,
+                                SlideUpPageRoute(
+                                  page: SettingsScreen(totalScore: _totalScore),
+                                ),
+                              ),
+                              tooltip: 'Settings',
+                            ),
+                            const SizedBox(height: 12),
+                            // Recon / Planning mode
+                            _buildSidebarBtn(
+                              icon: Icons.explore,
+                              color: _isPlanningMode
+                                  ? recColor.withValues(alpha: 0.2)
+                                  : Colors.black.withValues(alpha: 0.3),
+                              iconColor: _isPlanningMode ? recColor : Colors.white70,
+                              border: Border.all(
+                                color: _isPlanningMode ? recColor : Colors.white.withValues(alpha: 0.1),
+                              ),
+                              onPressed: _togglePlanningMode,
+                              tooltip: 'Recon Mode',
+                            ),
+                          ],
+                        )
+                      : const SizedBox.shrink(),
                 ),
               ],
             ),
           ),
+
+
+          // Map scale indicator — bottom-left, Google Maps style
+          if (settings.showMapScale.value)
+            Positioned(
+              bottom: 16,
+              left: 16,
+              child: _buildMapScaleWidget(settings.useMetric.value),
+            ),
 
           // Planning Stats Panel
           if (_isPlanningMode)
@@ -1192,3 +1556,37 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 }
 
+// ── Scale bar painter — Google Maps I-beam style ──────────────────────────────────────────
+class _ScaleBarPainter extends CustomPainter {
+  const _ScaleBarPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double cx = size.width;
+    final double cy = size.height / 2;
+    const double tickH = 9.0;
+
+    final outline = Paint()
+      ..color = Colors.black.withValues(alpha: 0.65)
+      ..strokeWidth = 3.0
+      ..strokeCap = StrokeCap.square
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawLine(Offset(1, 0), Offset(1, tickH), outline);
+    canvas.drawLine(Offset(1, cy), Offset(cx - 1, cy), outline);
+    canvas.drawLine(Offset(cx - 1, 0), Offset(cx - 1, tickH), outline);
+
+    final white = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.square
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawLine(Offset(1, 0), Offset(1, tickH), white);
+    canvas.drawLine(Offset(1, cy), Offset(cx - 1, cy), white);
+    canvas.drawLine(Offset(cx - 1, 0), Offset(cx - 1, tickH), white);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
