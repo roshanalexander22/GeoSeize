@@ -4,9 +4,11 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'models/capture_event.dart';
+import 'models/shop_item.dart';
 import 'services/storage_service.dart';
 import 'services/settings_service.dart';
 import 'services/auth_service.dart';
+import 'services/progression_service.dart';
 import 'utils/level_system.dart';
 import 'utils/rewards_system.dart';
 
@@ -27,6 +29,11 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
   List<CaptureEvent> _events       = [];
   List<double>       _journeyAreas = []; // per-journey area history
   bool               _isLoading    = true;
+  bool               _isRemotePlayer = false;
+  // Firestore summary stats for another player (null when viewing own stats)
+  Map<String, dynamic>? _remoteStats;
+  // Equipped cosmetics for the profile being viewed
+  Map<String, String?> _cosmetics = {};
 
   @override
   void initState() {
@@ -35,14 +42,46 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
   }
 
   Future<void> _loadData() async {
-    final events  = await _storageService.loadEvents();
-    final journeys = await _storageService.loadJourneyAreas();
-    events.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    setState(() {
-      _events       = events;
-      _journeyAreas = journeys;
-      _isLoading    = false;
-    });
+    String currentUsername = 'AGENT';
+    final user = _authService.currentUser;
+    if (user != null) {
+      final name = await _authService.getUsername(user.uid);
+      if (name != null && name.isNotEmpty) {
+        currentUsername = name;
+      }
+    }
+
+    if (widget.ownerUsername != null && widget.ownerUsername != currentUsername) {
+      // ── Remote player: load from Firestore ─────────────────────────────────
+      _isRemotePlayer = true;
+      final data = await _authService.getUserStatsByUsername(widget.ownerUsername!);
+      // Load their equipped cosmetics by UID (from stats data if available)
+      Map<String, String?> cosmetics = {};
+      final remoteUid = data?['uid'] as String?;
+      if (remoteUid != null) {
+        cosmetics = await ProgressionService.instance.getEquippedForUser(remoteUid);
+      }
+      if (!mounted) return;
+      setState(() {
+        _remoteStats = data?['stats'] as Map<String, dynamic>?;
+        _cosmetics   = cosmetics;
+        _isLoading   = false;
+      });
+    } else {
+      // ── Own player: load from local storage ─────────────────────────────────
+      _isRemotePlayer = false;
+      final events   = await _storageService.loadEvents();
+      final journeys = await _storageService.loadJourneyAreas();
+      final cosmetics = await ProgressionService.instance.getEquipped();
+      events.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      if (!mounted) return;
+      setState(() {
+        _events       = events;
+        _journeyAreas = journeys;
+        _cosmetics    = cosmetics;
+        _isLoading    = false;
+      });
+    }
   }
 
   // ── Formatting ───────────────────────────────────────────────────────────────
@@ -276,6 +315,42 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     );
   }
 
+  // ── Framed avatar (renders equipped frame ring or default border) ────────────
+  Widget _buildFramedAvatar({
+    required Widget child,
+    required ShopItem? frame,
+    required Color priColor,
+  }) {
+    if (frame != null && frame.frameColors != null) {
+      final colors = frame.frameColors!;
+      return Container(
+        width: 84, height: 84,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: SweepGradient(colors: [...colors, colors.first]),
+          boxShadow: [BoxShadow(color: colors.first.withValues(alpha: 0.5), blurRadius: 16)],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: Container(
+            decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF080810)),
+            child: ClipOval(child: child),
+          ),
+        ),
+      );
+    }
+    // Default priColor border
+    return Container(
+      width: 84, height: 84,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: priColor, width: 2),
+        boxShadow: [BoxShadow(color: priColor.withValues(alpha: 0.3), blurRadius: 15, spreadRadius: 2)],
+      ),
+      child: ClipOval(child: child),
+    );
+  }
+
   // ── Stat card ────────────────────────────────────────────────────────────────
   Widget _buildStatCard(String title, String value, IconData icon, Color color) {
     return Expanded(
@@ -312,20 +387,43 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
       );
     }
 
-    final totalArea     = _events.fold(0.0, (sum, e) => sum + e.area);
+    // ── Determine data source: own (local) or another player (Firestore) ───────
+    final double totalArea;
+    final double maxJourneyArea;
+    final double avgJourneyArea;
+    final int    zonesCount;
+    final int    daysActive;
+    final double aggressiveness;
+
+    if (_isRemotePlayer) {
+      final s = _remoteStats;
+      if (s != null) {
+        totalArea      = (s['totalArea']      as num?)?.toDouble() ?? 0.0;
+        maxJourneyArea = (s['maxJourneyArea'] as num?)?.toDouble() ?? 0.0;
+        avgJourneyArea = (s['avgJourneyArea'] as num?)?.toDouble() ?? 0.0;
+        zonesCount     = (s['zonesCount']     as num?)?.toInt()    ?? 0;
+        daysActive     = (s['daysActive']     as num?)?.toInt()    ?? 0;
+        aggressiveness = (s['aggressiveness'] as num?)?.toDouble() ?? 0.0;
+      } else {
+        // Player exists but hasn't synced stats to Firestore yet
+        totalArea = 0; maxJourneyArea = 0; avgJourneyArea = 0;
+        zonesCount = 0; daysActive = 0; aggressiveness = 0;
+      }
+    } else {
+      totalArea = _events.fold(0.0, (sum, e) => sum + e.area);
+      maxJourneyArea = _journeyAreas.isEmpty ? 0.0 : _journeyAreas.reduce((a, b) => a > b ? a : b);
+      avgJourneyArea = _journeyAreas.isEmpty ? 0.0 : totalArea / _journeyAreas.length;
+      zonesCount = _events.length;
+      final now2 = DateTime.now();
+      final recentCaptures = _events.where((e) => now2.difference(e.timestamp).inDays <= 7).length;
+      aggressiveness = _events.isEmpty ? 0 : (recentCaptures / 5.0).clamp(0.0, 1.0) * 100;
+      daysActive = _events.isEmpty
+          ? 0
+          : now2.difference(_events.map((e) => e.timestamp).reduce((a, b) => a.isBefore(b) ? a : b)).inDays + 1;
+    }
+
     final int currentLevel  = LevelSystem.getLevel(totalArea);
     final String rankTitle  = LevelSystem.getRankTitle(currentLevel);
-
-    // Per-journey stats (uses journey history, not zone sizes)
-    final double maxJourneyArea = _journeyAreas.isEmpty ? 0.0 : _journeyAreas.reduce((a, b) => a > b ? a : b);
-    final double avgJourneyArea = _journeyAreas.isEmpty ? 0.0 : totalArea / _journeyAreas.length;
-
-    final now = DateTime.now();
-    final recentCaptures = _events.where((e) => now.difference(e.timestamp).inDays <= 7).length;
-    final double aggressiveness = _events.isEmpty ? 0 : (recentCaptures / 5.0).clamp(0.0, 1.0) * 100;
-    final int daysActive = _events.isEmpty
-        ? 0
-        : now.difference(_events.map((e) => e.timestamp).reduce((a, b) => a.isBefore(b) ? a : b)).inDays + 1;
 
     final regionAreas = <String, double>{};
     for (var e in _events) {
@@ -357,40 +455,100 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                 // If opened from a zone tap, show that zone owner's name;
                 // otherwise fall back to the signed-in user's display name.
                 final username = widget.ownerUsername ?? snapshot.data ?? 'AGENT';
-                return Row(
+
+                // ── Equipped cosmetics ──────────────────────────────────────
+                final frameId    = _cosmetics['frame'];
+                final titlebarId = _cosmetics['titlebar'];
+
+                final equippedFrame = frameId != null
+                    ? ShopCatalogue.frames.where((f) => f.id == frameId).firstOrNull
+                    : null;
+                final equippedTitlebar = titlebarId != null
+                    ? ShopCatalogue.titlebars.where((t) => t.id == titlebarId).firstOrNull
+                    : null;
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    ValueListenableBuilder<String?>(
-                      valueListenable: SettingsService().profileImagePath,
-                      builder: (context, localPath, _) {
-                        final googlePhotoUrl = _authService.currentUser?.photoURL;
-                        Widget imageWidget;
-                        if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
-                          imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
-                        } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
-                          imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
-                        } else {
-                          imageWidget = Icon(Icons.account_circle, color: secColor, size: 60);
-                        }
-                        return Container(
-                          width: 80, height: 80,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: priColor, width: 2),
-                            boxShadow: [BoxShadow(color: priColor.withValues(alpha: 0.3), blurRadius: 15, spreadRadius: 2)],
+                    // ── Titlebar banner ────────────────────────────────────
+                    if (equippedTitlebar != null)
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 400),
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: equippedTitlebar.frameColors ?? [const Color(0xFF1A1A2E), const Color(0xFF0D0D1A)],
                           ),
-                          child: ClipOval(child: imageWidget),
-                        );
-                      },
-                    ),
-                    const SizedBox(width: 20),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('CALLSIGN', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 2)),
-                          Text(username.toUpperCase(), style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2)),
-                        ],
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Text(
+                          equippedTitlebar.titlebarLabel ?? equippedTitlebar.name,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
                       ),
+
+                    // ── Avatar + callsign row ──────────────────────────────
+                    Row(
+                      children: [
+                        // Avatar with optional frame
+                        _isRemotePlayer
+                          ? _buildFramedAvatar(
+                              child: Container(
+                                width: 80, height: 80,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  gradient: LinearGradient(
+                                    colors: [priColor.withValues(alpha: 0.4), priColor.withValues(alpha: 0.1)],
+                                    begin: Alignment.topLeft, end: Alignment.bottomRight,
+                                  ),
+                                ),
+                                child: Center(child: Icon(Icons.person, color: priColor, size: 40)),
+                              ),
+                              frame: equippedFrame,
+                              priColor: priColor,
+                            )
+                          : ValueListenableBuilder<String?>(
+                              valueListenable: SettingsService().profileImagePath,
+                              builder: (context, localPath, _) {
+                                final googlePhotoUrl = _authService.currentUser?.photoURL;
+                                Widget imageWidget;
+                                if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
+                                  imageWidget = Image.file(File(localPath), fit: BoxFit.cover);
+                                } else if (googlePhotoUrl != null && googlePhotoUrl.isNotEmpty) {
+                                  imageWidget = Image.network(googlePhotoUrl, fit: BoxFit.cover);
+                                } else {
+                                  imageWidget = Icon(Icons.account_circle, color: secColor, size: 60);
+                                }
+                                return _buildFramedAvatar(
+                                  child: Container(
+                                    width: 80, height: 80,
+                                    child: ClipOval(child: imageWidget),
+                                  ),
+                                  frame: equippedFrame,
+                                  priColor: priColor,
+                                );
+                              },
+                            ),
+                        const SizedBox(width: 20),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('CALLSIGN', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 2)),
+                              Text(username.toUpperCase(), style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2)),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 );
@@ -447,7 +605,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
               _buildStatCard('AVG CAPTURE',  _formatArea(avgJourneyArea), Icons.pie_chart_outline,           Colors.orangeAccent),
             ]),
             Row(children: [
-              _buildStatCard('ZONES OWNED',  '${_events.length}',         Icons.flag_outlined,               Colors.greenAccent),
+              _buildStatCard('ZONES OWNED',  '$zonesCount',         Icons.flag_outlined,               Colors.greenAccent),
               _buildStatCard('TACTICAL AGG.','${aggressiveness.toInt()}%', Icons.local_fire_department_outlined, Colors.redAccent),
             ]),
             Row(children: [
@@ -488,7 +646,23 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
             // Territorial presence
             Text('TERRITORIAL PRESENCE', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontWeight: FontWeight.bold, letterSpacing: 2, fontSize: 12)),
             const SizedBox(height: 12),
-            if (sortedRegions.isEmpty)
+            if (_isRemotePlayer)
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.03),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.lock_outline, color: Colors.white30, size: 20),
+                    const SizedBox(width: 12),
+                    Text('Territory details are private', style: TextStyle(color: Colors.white30, fontSize: 13)),
+                  ],
+                ),
+              )
+            else if (sortedRegions.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(24.0),
                 child: Center(child: Text('NO TERRITORIES DETECTED', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), letterSpacing: 2))),
@@ -534,7 +708,23 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
             // Recent activity
             Text('RECENT ACTIVITY LOG', style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontWeight: FontWeight.bold, letterSpacing: 2, fontSize: 12)),
             const SizedBox(height: 12),
-            if (_events.isEmpty)
+            if (_isRemotePlayer)
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.03),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.lock_outline, color: Colors.white30, size: 20),
+                    const SizedBox(width: 12),
+                    Text('Activity log is private', style: TextStyle(color: Colors.white30, fontSize: 13)),
+                  ],
+                ),
+              )
+            else if (_events.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(24.0),
                 child: Center(child: Text('NO RECENT ACTIVITY', style: TextStyle(color: Colors.white.withValues(alpha: 0.3), letterSpacing: 2))),

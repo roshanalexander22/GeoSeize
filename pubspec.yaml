@@ -28,6 +28,9 @@ dependencies:
   image_picker: ^1.2.2
   path_provider: ^2.1.5
   geocoding: ^4.0.0
+  http: ^1.2.0
+  spotify: ^0.16.1
+  audioplayers: ^6.7.1
 
 dev_dependencies:
   flutter_test:

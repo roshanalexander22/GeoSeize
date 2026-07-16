@@ -22,7 +22,7 @@ class SettingsService {
   // Map Style Options
   static const String mapStyleDark      = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png';
   static const String mapStyleLight     = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png';
-  static const String mapStyleStreet    = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  static const String mapStyleStreet    = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
   static const String mapStyleSatellite = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
 

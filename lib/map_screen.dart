@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' show cos, log, pi, pow;
+import 'dart:math' show cos, log, pow;
 import 'dart:ui';
 import 'dart:io' show File, Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -8,7 +8,6 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'models/capture_event.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:geocoding/geocoding.dart' as geo;
 import 'services/storage_service.dart';
 import 'utils/geo_calculator.dart';
@@ -20,6 +19,18 @@ import 'utils/page_transitions.dart';
 import 'services/settings_service.dart';
 import 'settings_screen.dart';
 import 'services/auth_service.dart';
+import 'quick_menu_screen.dart';
+import 'services/cached_tile_provider.dart';
+import 'services/progression_service.dart';
+import 'models/daily_mission.dart';
+import 'widgets/floating_music_player.dart';
+import 'models/territory.dart';
+import 'services/multiplayer_service.dart';
+import 'utils/polygon_clip.dart';
+
+/// Top-level callback registered by [_MapErrorBoundaryState].
+/// Called from main.dart's FlutterError.onError to trigger map auto-recovery.
+VoidCallback? mapErrorRecoveryCallback;
 
 
 class MapScreen extends StatefulWidget {
@@ -37,6 +48,137 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   final List<LatLng> _currentPath = [];
   List<CaptureEvent> _events = [];
   double _totalScore = 0.0;
+
+  // Cached layers to boost map performance (prevents 60fps polygon recalculation while panning)
+  List<Polygon> _cachedPolygons = [];
+  List<Marker> _cachedMarkers = [];
+  Color? _cachedPlayerColor;
+  int? _cachedEventsLength;
+
+  // ── Multiplayer state ─────────────────────────────────────────────────────
+  /// Territories owned by other players, streamed from Firestore in real-time.
+  List<Territory> _otherTerritories = [];
+  /// Cached render layers for rival territories (rebuilt only on change).
+  List<Polygon> _cachedRivalPolygons = [];
+  List<Marker> _cachedRivalMarkers = [];
+  int? _cachedRivalCount;
+  StreamSubscription<List<Territory>>? _territorySub;
+  bool _multiplayerReady = false;
+
+  void _updateCachedLayersIfNeeded(Color playerColor) {
+    if (_cachedPlayerColor == playerColor && _cachedEventsLength == _events.length) {
+      return;
+    }
+    _cachedPlayerColor = playerColor;
+    _cachedEventsLength = _events.length;
+
+    _cachedPolygons = _events.map((event) => Polygon(
+      points: event.polygon,
+      color: playerColor.withValues(alpha: 0.25),
+      borderColor: playerColor,
+      borderStrokeWidth: 3,
+    )).toList();
+
+    _cachedMarkers = _events.map((event) {
+      final center = GeoCalculator.getVisualCenter(event.polygon);
+      final fontSize = GeoCalculator.getZoneLabelFontSize(event.area);
+      final markerWidth = (fontSize * event.username.length * 0.75).clamp(80.0, 300.0);
+      return Marker(
+        point: center,
+        width: markerWidth,
+        height: fontSize + 12,
+        child: GestureDetector(
+          onTap: () {
+            Navigator.push(
+              context,
+              SlideUpPageRoute(
+                page: StatisticsScreen(
+                  ownerUsername: event.username,
+                ),
+              ),
+            );
+          },
+          child: Center(
+            child: Text(
+              event.username.toUpperCase(),
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+                fontSize: fontSize,
+                shadows: [
+                  const Shadow(blurRadius: 4.0, color: Colors.black),
+                  Shadow(blurRadius: 8.0, color: playerColor),
+                  Shadow(blurRadius: 12.0, color: playerColor),
+                ],
+              ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  List<Polygon> _buildRivalPolygons() {
+    if (_cachedRivalCount == _otherTerritories.length && _cachedRivalPolygons.isNotEmpty) {
+      return _cachedRivalPolygons;
+    }
+    _cachedRivalCount = _otherTerritories.length;
+    _cachedRivalPolygons = _otherTerritories.map((t) => Polygon(
+      points: t.polygon,
+      color: t.ownerColor.withValues(alpha: 0.25),
+      borderColor: t.ownerColor,
+      borderStrokeWidth: 3,
+    )).toList();
+    return _cachedRivalPolygons;
+  }
+
+  List<Marker> _buildRivalMarkers() {
+    if (_cachedRivalCount == _otherTerritories.length && _cachedRivalMarkers.isNotEmpty) {
+      return _cachedRivalMarkers;
+    }
+    _cachedRivalMarkers = _otherTerritories.map((t) {
+      final center = GeoCalculator.getVisualCenter(t.polygon);
+      final fontSize = GeoCalculator.getZoneLabelFontSize(t.area);
+      final markerWidth = (fontSize * t.ownerName.length * 0.75).clamp(80.0, 300.0);
+      return Marker(
+        point: center,
+        width: markerWidth,
+        height: fontSize + 12,
+        child: GestureDetector(
+          onTap: () {
+            Navigator.push(
+              context,
+              SlideUpPageRoute(
+                page: StatisticsScreen(
+                  ownerUsername: t.ownerName,
+                ),
+              ),
+            );
+          },
+          child: Center(
+            child: Text(
+              t.ownerName.toUpperCase(),
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+                fontSize: fontSize,
+                shadows: [
+                  const Shadow(blurRadius: 4.0, color: Colors.black),
+                  Shadow(blurRadius: 8.0, color: t.ownerColor),
+                  Shadow(blurRadius: 12.0, color: t.ownerColor),
+                ],
+              ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+        ),
+      );
+    }).toList();
+    return _cachedRivalMarkers;
+  }
   
   StreamSubscription<Position>? _positionStream;
   bool _isCapturing = false;
@@ -57,9 +199,16 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   AnimationController? _markerAnimController;
   Animation<double>? _animatedLat;
   Animation<double>? _animatedLng;
-  LatLng? _displayLocation; // interpolated position used for rendering
+  // Performance: ValueNotifier so only the MarkerLayer rebuilds (not full tree)
+  final ValueNotifier<LatLng?> _displayLocationNotifier = ValueNotifier<LatLng?>(null);
+  LatLng? get _displayLocation => _displayLocationNotifier.value;
+  set _displayLocation(LatLng? v) => _displayLocationNotifier.value = v;
+
+  // Performance: ValueNotifier to isolate map scale bar updates (runs at 60/120 fps)
+  late final ValueNotifier<({double zoom, double lat})> _mapScaleNotifier;
   bool _followingUser = true; // whether the camera auto-follows the marker
   bool _sidebarExpanded = false; // whether the collapsible action buttons are shown
+  double? _currentMaxZoom; // maximum zoom limit for satellite view
 
   // ── Journey capture tracking ──────────────────────────────────────────────
   DateTime? _captureStartTime;  // when the current capture session began
@@ -68,10 +217,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   // ── Map camera tracking (for scale widget) ────────────────────────────────
   double _mapZoom = 16.5;
   double _mapLat  = 0.0;
+
+  // ── Map error recovery ────────────────────────────────────────────────────
+  // Incrementing this key forces FlutterMap to be completely recreated,
+  // which is the only reliable way to recover from internal render errors.
+  int _mapKey = 0;
+  DateTime? _lastMapRecovery;
   
   @override
   void initState() {
     super.initState();
+    _mapScaleNotifier = ValueNotifier((zoom: 16.5, lat: 0.0));
     _loadData();
     _checkPermissionsAndGetLocation();
     // Snap zoom when user switches to satellite while over-zoomed
@@ -97,13 +253,29 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       final lng = _animatedLng?.value;
       if (lat != null && lng != null) {
         final pos = LatLng(lat, lng);
-        setState(() { _displayLocation = pos; });
+        // Update notifier directly — only the ValueListenableBuilder in the
+        // MarkerLayer rebuilds, NOT the whole screen (was 60fps setState before)
+        _displayLocationNotifier.value = pos;
         // Only move the camera if the user hasn't manually panned away
-        if (_followingUser && _mapController.camera.zoom > 0) {
-          _mapController.move(pos, _mapController.camera.zoom);
+        final targetZoom = _mapController.camera.zoom;
+        if (_followingUser &&
+            targetZoom > 0 &&
+            !targetZoom.isNaN &&
+            !targetZoom.isInfinite &&
+            !pos.latitude.isNaN &&
+            !pos.latitude.isInfinite &&
+            !pos.longitude.isNaN &&
+            !pos.longitude.isInfinite) {
+          _mapController.move(pos, targetZoom);
         }
       }
     });
+
+    // ── Multiplayer: subscribe to real-time territory stream ──────────────────
+    // We start with a default centre; once GPS resolves, we re-centre.
+    _territorySub = MultiplayerService.instance.territoriesStream.listen(
+      _onTerritoryUpdate,
+    );
   }
 
   Future<void> _loadData() async {
@@ -126,6 +298,55 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         _currentUsername = tempUsername;
       });
     }
+
+    // ── Multiplayer: migrate legacy events & start geo stream ─────────────────
+    final uid = AuthService().currentUser?.uid;
+    if (uid != null) {
+      final color = SettingsService().selectedColor;
+      // Push existing single-player zones into the global territories collection
+      // so other players can see them. Safe to call repeatedly (skips if migrated).
+      MultiplayerService.instance.migrateExistingEvents(
+        ownerId:    uid,
+        ownerName:  tempUsername,
+        ownerColor: color,
+        rawEvents:  loadedEvents.map((e) => e.toJson()).toList(),
+      ).catchError((_) {});
+    }
+  }
+
+  // ── Handle incoming Firestore territory updates ────────────────────────────
+  void _onTerritoryUpdate(List<Territory> allTerritories) {
+    if (!mounted) return;
+    final uid = AuthService().currentUser?.uid;
+
+    // Separate own territories from rivals.
+    final own    = uid == null ? <Territory>[] : allTerritories.where((t) => t.ownerId == uid).toList();
+    final rivals = uid == null ? allTerritories : allTerritories.where((t) => t.ownerId != uid).toList();
+
+    // Rebuild _events from own Firestore territories so the capture engine
+    // always has the true server-side territory list.
+    final serverEvents = own.map((t) => CaptureEvent(
+      id:         t.id,
+      polygon:    t.polygon,
+      area:       t.area,
+      timestamp:  t.capturedAt,
+      tier:       TerritoryTier.common, // tier updated below via score
+      username:   t.ownerName,
+      regionName: t.regionName,
+    )).toList();
+
+    final serverScore = own.fold(0.0, (s, t) => s + t.area);
+
+    setState(() {
+      if (serverEvents.isNotEmpty) {
+        // Only replace local events once the server has data.
+        // This prevents a blank map flash on startup before migration completes.
+        _events     = serverEvents;
+        _totalScore = serverScore;
+      }
+      _otherTerritories = rivals;
+      _multiplayerReady = true;
+    });
   }
   
   Future<void> _checkPermissionsAndGetLocation() async {
@@ -137,7 +358,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         setState(() {
           _currentLocation = initialLoc;
           _displayLocation = initialLoc; // show marker immediately
+          _mapLat = position.latitude;
+          _mapScaleNotifier.value = (zoom: _mapZoom, lat: position.latitude);
+          if (SettingsService().mapStyle.value == SettingsService.mapStyleSatellite) {
+            _currentMaxZoom = _satelliteMaxZoom().clamp(3.0, 22.0);
+          }
         });
+        // Start the multiplayer geo-window centred on the player's real location.
+        MultiplayerService.instance.startListening(initialLoc);
         // Do NOT call _mapController.move() here — FlutterMap hasn't
         // rendered yet (still showing the loading spinner).
         // The map uses initialCenter: _currentLocation! so it centres itself.
@@ -150,7 +378,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       }
     }
     // Start the always-on stream so the blue dot moves continuously.
-    // Path recording only happens when _isCapturing is true (guarded inside _onNewGpsPoint).
+    // Also centre the multiplayer geo-window once we have GPS.
     _initLocationStream();
   }
 
@@ -187,18 +415,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       // Web uses the browser Geolocation API — no Android/Apple specifics.
       locationSettings = const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
+        distanceFilter: 3,
       );
     } else if (Platform.isAndroid) {
       locationSettings = AndroidSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
+        distanceFilter: 3,
         forceLocationManager: false,
       );
     } else if (Platform.isIOS || Platform.isMacOS) {
       locationSettings = AppleSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
+        distanceFilter: 3,
         activityType: ActivityType.fitness,
         pauseLocationUpdatesAutomatically: false,
       );
@@ -207,7 +435,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       // settings and let the error handler show a graceful message.
       locationSettings = const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
+        distanceFilter: 3,
       );
     }
 
@@ -259,7 +487,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
       if (_displayLocation == null) {
         setState(() { _displayLocation = smoothed; });
-        _mapController.move(smoothed, _mapController.camera.zoom);
+        final targetZoom = _mapController.camera.zoom;
+        if (!smoothed.latitude.isNaN &&
+            !smoothed.latitude.isInfinite &&
+            !smoothed.longitude.isNaN &&
+            !smoothed.longitude.isInfinite &&
+            !targetZoom.isNaN &&
+            !targetZoom.isInfinite) {
+          _mapController.move(smoothed, targetZoom);
+        }
       } else {
         _animateMarkerTo(smoothed);
       }
@@ -381,6 +617,20 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       {List<LatLng>? remainingPath}) async {
     _captureInProgress = true;
 
+    // ── Pre-flight validation ─────────────────────────────────────────────────
+    final quickArea = PolygonClip.areaM2(polygon);
+    if (quickArea < MultiplayerService.minCaptureAreaM2) {
+      // Polygon too tiny (GPS jitter) — silently discard
+      setState(() {
+        _currentPath.clear();
+        if (remainingPath != null) _currentPath.addAll(remainingPath);
+        _hasBeenOutside = false;
+      });
+      _captureInProgress = false;
+      return;
+    }
+
+    // ── Single-player local merge (own zones) ─────────────────────────────────
     final newZones = CaptureEngine.resolveCapture(polygon, zones);
 
     // Case 5: nested loop — no new area added (same list reference)
@@ -473,6 +723,72 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     if (journeyGain > 1.0) {
       await _storageService.addJourneyArea(journeyGain);
     }
+
+    // ── Multiplayer: submit capture to Firestore (authoritative) ──────────────
+    // Runs async so it never blocks the UI. Errors are silently swallowed.
+    final uid = AuthService().currentUser?.uid;
+    if (uid != null) {
+      MultiplayerService.instance.submitCapture(
+        newPolygon: polygon,
+        ownerId:    uid,
+        ownerName:  _currentUsername,
+        ownerColor: SettingsService().selectedColor,
+        regionName: regionName,
+      ).then((result) {
+        if (result.rivalsConquered > 0 && mounted) {
+          // Brief conquest notification
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '⚔️  Conquered ${result.rivalsConquered} rival territory!'
+                '  +${result.areaFromRivals.toStringAsFixed(0)} m²',
+              ),
+              backgroundColor: const Color(0xFFFF4500),
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }).catchError((_) {});
+    }
+
+    // ── Update daily mission progress ─────────────────────────────────
+    // capture mission: how much area was gained
+    if (journeyGain > 1.0) {
+      ProgressionService.instance.addMissionProgress(MissionType.capture, journeyGain).catchError((_) {});
+    }
+    // territory mission: number of new zones created
+    if (newEvents.isNotEmpty) {
+      ProgressionService.instance.addMissionProgress(MissionType.territory, newEvents.length.toDouble()).catchError((_) {});
+    }
+    // walk mission: metres walked this session (journeyDist already captured above)
+    if (journeyDist > 0) {
+      ProgressionService.instance.addMissionProgress(MissionType.walk, journeyDist).catchError((_) {});
+    }
+
+    // ── Sync summary stats to Firestore for multiplayer visibility ─────────────
+    // Fire-and-forget: any error is swallowed so it never blocks the game loop.
+    if (uid != null) {
+      final allJourneys = await _storageService.loadJourneyAreas();
+      final totalA = _totalScore;
+      final maxJ   = allJourneys.isEmpty ? 0.0 : allJourneys.reduce((a, b) => a > b ? a : b);
+      final avgJ   = allJourneys.isEmpty ? 0.0 : totalA / allJourneys.length;
+      final now    = DateTime.now();
+      final recent = _events.where((e) => now.difference(e.timestamp).inDays <= 7).length;
+      final aggr   = _events.isEmpty ? 0.0 : (recent / 5.0).clamp(0.0, 1.0) * 100;
+      final daysAct = _events.isEmpty ? 0
+          : now.difference(_events.map((e) => e.timestamp).reduce((a, b) => a.isBefore(b) ? a : b)).inDays + 1;
+      AuthService().updateUserStats(uid,
+        totalArea:      totalA,
+        zonesCount:     _events.length,
+        maxJourneyArea: maxJ,
+        avgJourneyArea: avgJ,
+        daysActive:     daysAct,
+        totalJourneys:  allJourneys.length,
+        aggressiveness: aggr,
+      ).catchError((_) {}); // ignore Firestore errors
+    }
+
     _captureInProgress = false;
 
     if (newEvents.isNotEmpty && mounted) {
@@ -849,59 +1165,92 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   // ── Google Maps-style scale bar ──────────────────────────────────────────
   ({double widthPx, String label}) _computeScaleBar(double zoom, double latDeg, bool metric) {
-    final metersPerPx = 40075016.686 * cos(latDeg * pi / 180) / (256.0 * pow(2, zoom));
+    final double safeZoom = zoom.clamp(0.0, 30.0);
+    final double safeLat = latDeg.clamp(-85.0511, 85.0511);
+
+    final metersPerPx = 40075016.686 * cos(safeLat * pi / 180) / (256.0 * pow(2, safeZoom));
+    if (metersPerPx.isNaN || metersPerPx.isInfinite || metersPerPx <= 0) {
+      return (widthPx: 0.0, label: '');
+    }
+
     const double targetWidthPx = 90.0;
     final double targetMeters  = metersPerPx * targetWidthPx;
 
-    final niceM = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+    final niceM = [
+      0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+      1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000
+    ];
     double chosen = niceM[0].toDouble();
     for (final d in niceM) {
       if (d.toDouble() <= targetMeters) chosen = d.toDouble();
       else break;
     }
 
-    final barWidthPx = chosen / metersPerPx;
+    final barWidthPx = (chosen / metersPerPx).clamp(0.0, 120.0);
 
     String label;
     if (metric) {
-      label = chosen >= 1000
-          ? '${(chosen / 1000).toStringAsFixed(chosen >= 10000 ? 0 : 1)} km'
-          : '${chosen.toStringAsFixed(0)} m';
+      if (chosen >= 1000) {
+        label = '${(chosen / 1000).toStringAsFixed(chosen >= 10000 ? 0 : 1)} km';
+      } else if (chosen >= 1) {
+        label = '${chosen.toStringAsFixed(0)} m';
+      } else if (chosen >= 0.01) {
+        label = '${(chosen * 100).toStringAsFixed(0)} cm';
+      } else {
+        label = '${(chosen * 1000).toStringAsFixed(0)} mm';
+      }
     } else {
       final feet = chosen * 3.28084;
-      label = feet >= 5280
-          ? '${(feet / 5280).toStringAsFixed(1)} mi'
-          : '${feet.toStringAsFixed(0)} ft';
+      if (feet >= 5280) {
+        label = '${(feet / 5280).toStringAsFixed(1)} mi';
+      } else if (feet >= 1) {
+        label = '${feet.toStringAsFixed(0)} ft';
+      } else {
+        label = '${(feet * 12).toStringAsFixed(0)} in';
+      }
     }
     return (widthPx: barWidthPx, label: label);
   }
 
   Widget _buildMapScaleWidget(bool metric) {
-    final bar = _computeScaleBar(_mapZoom, _mapLat, metric);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // Distance label
-        Text(
-          bar.label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 10,
-            fontWeight: FontWeight.w700,
-            shadows: [Shadow(blurRadius: 3, color: Colors.black87)],
-          ),
-        ),
-        const SizedBox(height: 3),
-        // I-beam bar
-        SizedBox(
-          width: bar.widthPx,
-          height: 9,
-          child: CustomPaint(
-            painter: _ScaleBarPainter(),
-          ),
-        ),
-      ],
+    return ValueListenableBuilder<({double zoom, double lat})>(
+      valueListenable: _mapScaleNotifier,
+      builder: (context, scaleData, _) {
+        late final ({double widthPx, String label}) bar;
+        try {
+          bar = _computeScaleBar(scaleData.zoom, scaleData.lat, metric);
+        } catch (_) {
+          bar = (widthPx: 0.0, label: '');
+        }
+        if (bar.widthPx.isNaN || bar.widthPx.isInfinite || bar.widthPx <= 0 || bar.widthPx > 300) {
+          return const SizedBox.shrink();
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Distance label
+            Text(
+              bar.label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                shadows: [Shadow(blurRadius: 3, color: Colors.black87)],
+              ),
+            ),
+            const SizedBox(height: 3),
+            // I-beam bar
+            SizedBox(
+              width: bar.widthPx,
+              height: 9,
+              child: CustomPaint(
+                painter: _ScaleBarPainter(),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -959,8 +1308,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   void dispose() {
     SettingsService().mapStyle.removeListener(_onMapStyleChanged);
     _positionStream?.cancel();
+    _territorySub?.cancel();
     _pulseController.dispose();
     _markerAnimController?.dispose();
+    _displayLocationNotifier.dispose();
+    _mapScaleNotifier.dispose();
     super.dispose();
   }
 
@@ -968,12 +1320,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   /// scale never drops below 27 m/cm — the point where ESRI tiles run out.
   /// The result varies with latitude (cos projection).
   double _satelliteMaxZoom() {
+    if (_mapLat.isNaN) return 18.0;
     const double minMetersPerCm = 27.0; // scale threshold requested by user
     const double earthCirc      = 40075016.686;
     const double dpPerCm        = 63.0;  // Flutter logical pixels per cm
-    final cosLat = cos(_mapLat * pi / 180).clamp(0.001, 1.0);
+    final double angle = _mapLat * pi / 180;
+    if (angle.isNaN) return 18.0;
+    final cosVal = cos(angle);
+    if (cosVal.isNaN) return 18.0;
+    final cosLat = cosVal.clamp(0.001, 1.0);
     final val    = earthCirc * cosLat * dpPerCm / (256.0 * minMetersPerCm);
-    return log(val) / log(2);
+    if (val.isNaN || val <= 0) return 18.0;
+    final res = log(val) / log(2);
+    return res.isNaN ? 18.0 : res;
   }
 
   /// Called whenever the map style changes.
@@ -981,11 +1340,29 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   /// snap the camera back to the computed satellite max zoom.
   void _onMapStyleChanged() {
     if (!mounted) return;
-    if (SettingsService().mapStyle.value == SettingsService.mapStyleSatellite) {
-      final maxZ = _satelliteMaxZoom();
-      if (_mapController.camera.zoom > maxZ) {
-        _mapController.move(_mapController.camera.center, maxZ);
+    final mapStyle = SettingsService().mapStyle.value;
+    if (mapStyle == SettingsService.mapStyleSatellite) {
+      final maxZ = _satelliteMaxZoom().clamp(3.0, 22.0);
+      const minZ = 12.0;
+      setState(() {
+        _currentMaxZoom = maxZ;
+      });
+      double targetZoom = _mapController.camera.zoom;
+      if (targetZoom > maxZ) {
+        targetZoom = maxZ;
+      } else if (targetZoom < minZ) {
+        targetZoom = minZ;
       }
+      if (targetZoom != _mapController.camera.zoom) {
+        final center = _mapController.camera.center;
+        if (!center.latitude.isNaN && !center.longitude.isNaN && !targetZoom.isNaN) {
+          _mapController.move(center, targetZoom);
+        }
+      }
+    } else {
+      setState(() {
+        _currentMaxZoom = null;
+      });
     }
   }
 
@@ -1010,6 +1387,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         final recColor = settings.reconColor.value;
 
         final playerColor = settings.selectedColor;
+        _updateCachedLayersIfNeeded(playerColor);
 
         return Scaffold(
           body: Stack(
@@ -1032,89 +1410,96 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               ),
             )
           else
-            FlutterMap(
+            _MapErrorBoundary(
+              key: ValueKey('map_$_mapKey'),
+              onError: () {
+                // Throttle: only recover once per 600ms to avoid loops
+                final now = DateTime.now();
+                if (_lastMapRecovery == null ||
+                    now.difference(_lastMapRecovery!) > const Duration(milliseconds: 600)) {
+                  _lastMapRecovery = now;
+                  setState(() => _mapKey++);
+                }
+              },
+              child: FlutterMap(
+              key: ValueKey('flutter_map_$_mapKey'),
               mapController: _mapController,
               options: MapOptions(
                 initialCenter: _currentLocation!,
-                initialZoom: 16.5,
-                minZoom: 3.0,
-                maxZoom: mapStyle == SettingsService.mapStyleSatellite ? _satelliteMaxZoom() : null,
+                initialZoom: _mapZoom.clamp(2.0, 22.0),
+                minZoom: mapStyle == SettingsService.mapStyleSatellite ? 12.0 : 2.0,
+                maxZoom: mapStyle == SettingsService.mapStyleSatellite ? (_currentMaxZoom ?? 22.0) : 22.0,
 
+                interactionOptions: const InteractionOptions(
+                  enableMultiFingerGestureRace: true,
+                ),
                 onTap: _handleMapTap,
                 onPositionChanged: (camera, hasGesture) {
-                  final newZoom = camera.zoom;
-                  final newLat  = camera.center.latitude;
-                  final panGesture = hasGesture && _followingUser;
-                  if (panGesture || newZoom != _mapZoom || (newLat - _mapLat).abs() > 0.0001) {
-                    setState(() {
-                      _mapZoom = newZoom;
-                      _mapLat  = newLat;
-                      if (panGesture) _followingUser = false;
-                    });
+                  try {
+                    final newZoom = camera.zoom;
+                    final newLat  = camera.center.latitude;
+                    final newLng  = camera.center.longitude;
+                    final panGesture = hasGesture && _followingUser;
+
+                    // 1. Guard against NaN/Infinity coordinates to avoid layout assertion crashes
+                    if (newZoom.isNaN || newZoom.isInfinite ||
+                        newLat.isNaN || newLat.isInfinite ||
+                        newLng.isNaN || newLng.isInfinite) {
+                      return;
+                    }
+
+                    // 2. Clamp values into sane ranges
+                    final clampedZoom = newZoom.clamp(0.5, 30.0);
+                    final clampedLat  = newLat.clamp(-85.0511, 85.0511);
+
+                    // 3. Update camera variables and notifier for the Scale Bar widget.
+                    if (clampedZoom != _mapZoom || (clampedLat - _mapLat).abs() > 0.0001) {
+                      _mapZoom = clampedZoom;
+                      _mapLat  = clampedLat;
+                      _mapScaleNotifier.value = (zoom: clampedZoom, lat: clampedLat);
+                    }
+
+                    // 4. Disable user tracking only at the start of a panning gesture
+                    if (panGesture) {
+                      setState(() {
+                        _followingUser = false;
+                      });
+                    }
+                  } catch (e) {
+                    debugPrint('[GeoSeize] onPositionChanged error suppressed: $e');
                   }
                 },
               ),
               children: [
                 TileLayer(
                   urlTemplate: mapStyle,
-                  // Only use subdomains for tile URLs that contain the {s} placeholder
+                  tileProvider: CachedTileProvider(),
                   subdomains: mapStyle.contains('{s}') ? const <String>['a', 'b', 'c', 'd'] : const <String>[],
                   userAgentPackageName: 'com.example.geoseize',
+                  maxNativeZoom: mapStyle == SettingsService.mapStyleSatellite ? 18 : 19,
                 ),
-                PolygonLayer(
-                  polygons: _events.map((event) => Polygon(
-                    points: event.polygon,
-                    color: playerColor.withValues(alpha: 0.25),
-                    borderColor: playerColor,
-                    borderStrokeWidth: 3,
-                  )).toList(),
+                // ── Layer 1: Rival territories (other players) ──────────────
+                // Rendered beneath the player's own territories so own zones
+                // always appear on top. Each rival territory uses that player's
+                // chosen colour at reduced opacity.
+                if (_otherTerritories.isNotEmpty)
+                  RepaintBoundary(
+                    child: PolygonLayer(
+                      polygons: _buildRivalPolygons(),
+                    ),
+                  ),
+                if (_otherTerritories.isNotEmpty)
+                  MarkerLayer(
+                    markers: _buildRivalMarkers(),
+                  ),
+                // ── Layer 2: Player's own territories ──────────────────────
+                RepaintBoundary(
+                  child: PolygonLayer(
+                    polygons: _cachedPolygons,
+                  ),
                 ),
                 MarkerLayer(
-                  markers: _events.map((event) {
-                    // getVisualCenter is always inside the polygon, even for
-                    // concave or fused L-shaped / T-shaped zones.
-                    final center = GeoCalculator.getVisualCenter(event.polygon);
-                    final fontSize = GeoCalculator.getZoneLabelFontSize(event.area);
-                    // Scale the marker widget width proportionally so text always fits
-                    final markerWidth = (fontSize * event.username.length * 0.75).clamp(80.0, 300.0);
-                    return Marker(
-                      point: center,
-                      width: markerWidth,
-                      height: fontSize + 12,
-                      child: GestureDetector(
-                        onTap: () {
-                          Navigator.push(
-                            context,
-                            SlideUpPageRoute(
-                              page: StatisticsScreen(
-                                // Pass the zone owner's username.
-                                // When multiplayer launches, swap this for a userId
-                                // and load that user's data from Firestore.
-                                ownerUsername: event.username,
-                              ),
-                            ),
-                          );
-                        },
-                        child: Center(
-                          child: Text(
-                            event.username.toUpperCase(),
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                              fontSize: fontSize,
-                              shadows: [
-                                const Shadow(blurRadius: 4.0, color: Colors.black),
-                                Shadow(blurRadius: 8.0, color: playerColor),
-                                Shadow(blurRadius: 12.0, color: playerColor),
-                              ],
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
+                  markers: _cachedMarkers,
                 ),
                 PolylineLayer(
                   polylines: [
@@ -1170,11 +1555,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       ),
                     )).toList(),
                   ),
-                if (_displayLocation != null)
-                  MarkerLayer(
-                    markers: [
-                      Marker(
-                        point: _displayLocation!,
+                ValueListenableBuilder<LatLng?>(
+                  valueListenable: _displayLocationNotifier,
+                  builder: (_, displayLoc, __) {
+                    if (displayLoc == null) return const SizedBox.shrink();
+                    return MarkerLayer(
+                      markers: [
+                        Marker(
+                          point: displayLoc,
                         width: 40,
                         height: 40,
                         child: AnimatedBuilder(
@@ -1265,9 +1653,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                         ),
                       ),
                     ],
-                  ),
+                  );
+                  },
+                ),
               ],
-            ),
+            ), // end FlutterMap
+            ), // end _MapErrorBoundary
 
           // Glassmorphism HUD
           Positioned(
@@ -1391,7 +1782,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                                   _displayLocation = pt;
                                   _followingUser   = true;
                                 });
-                                _mapController.move(pt, _mapController.camera.zoom);
+                                final targetZoom = _mapController.camera.zoom;
+                                if (!pt.latitude.isNaN &&
+                                    !pt.latitude.isInfinite &&
+                                    !pt.longitude.isNaN &&
+                                    !pt.longitude.isInfinite &&
+                                    !targetZoom.isNaN &&
+                                    !targetZoom.isInfinite) {
+                                  _mapController.move(pt, targetZoom);
+                                }
                                 if (mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     const SnackBar(content: Text('Location refreshed — following you again!')),
@@ -1425,6 +1824,23 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                               ),
                               onPressed: _togglePlanningMode,
                               tooltip: 'Recon Mode',
+                            ),
+                            const SizedBox(height: 12),
+                            // Quick Menu Dashboard
+                            _buildSidebarBtn(
+                              icon: Icons.dashboard,
+                              onPressed: () {
+                                Navigator.push(
+                                  context,
+                                  SlideUpPageRoute(
+                                    page: QuickMenuScreen(
+                                      initialLat: _currentLocation?.latitude ?? 0.0,
+                                      initialLng: _currentLocation?.longitude ?? 0.0,
+                                    ),
+                                  ),
+                                ).then((_) => _loadData());
+                              },
+                              tooltip: 'Dashboard',
                             ),
                           ],
                         )
@@ -1548,6 +1964,20 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               ),
             ),
           ),
+          
+          // Spotify Floating Music Player Overlay
+          FloatingMusicPlayer(
+            onDismissed: () {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Music player dismissed and playback stopped.'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              }
+            },
+          ),
         ],
         ),
         );
@@ -1563,6 +1993,7 @@ class _ScaleBarPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final double cx = size.width;
+    if (cx.isNaN || cx.isInfinite || cx <= 2.0) return;
     final double cy = size.height / 2;
     const double tickH = 9.0;
 
@@ -1589,4 +2020,67 @@ class _ScaleBarPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// ── Map Error Boundary ────────────────────────────────────────────────────────
+// Wraps FlutterMap in a proper Flutter error boundary.
+// When FlutterMap's render tree throws (e.g. during violent zoom gestures),
+// this widget catches the error and calls [onError], which should increment
+// the map key to force a complete recreation of the map widget.
+class _MapErrorBoundary extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onError;
+
+  const _MapErrorBoundary({
+    required super.key,
+    required this.child,
+    required this.onError,
+  });
+
+  @override
+  State<_MapErrorBoundary> createState() => _MapErrorBoundaryState();
+}
+
+class _MapErrorBoundaryState extends State<_MapErrorBoundary> {
+  bool _hasError = false;
+
+  // Register to the top-level callback so main.dart's error handler can reach us
+  static void Function()? _triggerRecovery;
+
+  @override
+  void initState() {
+    super.initState();
+    _hasError = false;
+    _triggerRecovery = _recover;
+    mapErrorRecoveryCallback = _recover; // expose to main.dart
+  }
+
+  @override
+  void dispose() {
+    if (_triggerRecovery == _recover) _triggerRecovery = null;
+    if (mapErrorRecoveryCallback == _recover) mapErrorRecoveryCallback = null;
+    super.dispose();
+  }
+
+  void _recover() {
+    if (!mounted) return;
+    setState(() => _hasError = true);
+    // Tell the parent to increment the map key (recreate FlutterMap)
+    widget.onError();
+    // After a short delay, reset so parent's new map widget shows correctly
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (mounted) setState(() => _hasError = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_hasError) {
+      // Briefly show dark background while parent rebuilds the map
+      return const SizedBox.expand(
+        child: ColoredBox(color: Color(0xFF0D0D12)),
+      );
+    }
+    return widget.child;
+  }
 }

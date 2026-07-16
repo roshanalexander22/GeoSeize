@@ -121,4 +121,51 @@ class AuthService {
       print('Firestore error: $e');
     }
   }
+
+  // ── Multiplayer: push summary stats to Firestore ───────────────────────────
+  /// Called after every capture so other players can see this user's progress.
+  /// Fire-and-forget: errors are swallowed so they never block the game loop.
+  Future<void> updateUserStats(String uid, {
+    required double totalArea,
+    required int    zonesCount,
+    required double maxJourneyArea,
+    required double avgJourneyArea,
+    required int    daysActive,
+    required int    totalJourneys,
+    required double aggressiveness,
+  }) async {
+    try {
+      await _firestore.collection('users').doc(uid).set({
+        'stats': {
+          'totalArea':      totalArea,
+          'zonesCount':     zonesCount,
+          'maxJourneyArea': maxJourneyArea,
+          'avgJourneyArea': avgJourneyArea,
+          'daysActive':     daysActive,
+          'totalJourneys':  totalJourneys,
+          'aggressiveness': aggressiveness,
+          'updatedAt':      FieldValue.serverTimestamp(),
+        },
+      }, SetOptions(merge: true));
+    } catch (e) {
+      print('Firestore stats sync error: $e');
+    }
+  }
+
+  // ── Multiplayer: fetch another player's public stats by username ───────────
+  Future<Map<String, dynamic>?> getUserStatsByUsername(String username) async {
+    try {
+      final query = await _firestore
+          .collection('users')
+          .where('username', isEqualTo: username)
+          .limit(1)
+          .get();
+      if (query.docs.isNotEmpty) {
+        return query.docs.first.data();
+      }
+    } catch (e) {
+      print('Firestore lookup error: $e');
+    }
+    return null;
+  }
 }

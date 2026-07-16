@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/services.dart';
-import 'map_screen.dart';
 import 'loading_screen.dart';
+import 'map_screen.dart';
 import 'login_screen.dart';
 import 'username_setup_screen.dart';
 import 'services/settings_service.dart';
@@ -11,6 +11,7 @@ import 'services/auth_service.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
+import 'services/cached_tile_provider.dart';
 
 void main() async {
   // Ensure we can set system UI overlays
@@ -19,11 +20,39 @@ void main() async {
   // Initialize Preferences
   await SettingsService().init();
 
+  // Initialize Cached Map Tiles
+  await CachedTileProvider.init();
+
   // Initialize Firebase
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
   
+  // ── Global error safety net + map auto-recovery ────────────────────────────
+  // When FlutterMap's render tree throws during violent zoom gestures, the
+  // global handler catches it and delegates to _MapErrorBoundaryState which
+  // sets _hasError=true → shows dark bg → increments _mapKey → map recreates.
+  // Non-render errors still propagate via the original handler.
+  final originalOnError = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails details) {
+    final message = details.exceptionAsString();
+    final isRenderError = details.library == 'rendering library' ||
+        details.library == 'widgets library' ||
+        message.contains('!size.isInfinite') ||
+        message.contains('is not finite') ||
+        message.contains('Infinity') ||
+        message.contains('NaN') ||
+        message.contains('RenderObject') ||
+        message.contains('constraints');
+    if (isRenderError) {
+      debugPrint('[GeoSeize] Render error caught → triggering map recovery: $message');
+      // Trigger the error boundary to recreate FlutterMap
+      mapErrorRecoveryCallback?.call();
+      return;
+    }
+    originalOnError?.call(details);
+  };
+
   // Auth logic is handled via StreamBuilder down the tree
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
